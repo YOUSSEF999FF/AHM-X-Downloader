@@ -8,6 +8,20 @@ TOKEN = '8996530159:AAEIwyVSeMk6E7zlOLBpIMX79TKIc_EngFs'  # حط التوكن ب
 bot = telebot.TeleBot(TOKEN)
 user_urls = {}
 
+# إعدادات عامة لتخطي حظر يوتيوب على السيرفرات
+YTDL_BASE_OPTS = {
+    'quiet': True,
+    'no_warnings': True,
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['android', 'ios', 'mweb']
+        }
+    },
+    'http_headers': {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+    }
+}
+
 def format_size(bytes_size):
     if not bytes_size or bytes_size == 0:
         return "0 MB"
@@ -27,11 +41,11 @@ def send_welcome(message):
 
 @bot.message_handler(func=lambda message: 'http' in message.text)
 def fetch_video_info(message):
-    url = message.text
+    url = message.text.strip()
     chat_id = message.chat.id
     msg = bot.reply_to(message, "جاري فحص الفيديو واستخراج الجودات والمساحات... ⏳")
     
-    ydl_opts = {'quiet': True}
+    ydl_opts = dict(YTDL_BASE_OPTS)
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -66,8 +80,9 @@ def fetch_video_info(message):
             
         bot.edit_message_text("اختار الجودة اللي عايز تحمل بيها 👇:", chat_id, msg.message_id, reply_markup=markup)
         
-    except Exception:
-        bot.edit_message_text("حصلت مشكلة في قراءة الرابط، اتأكد إنه شغال.", chat_id, msg.message_id)
+    except Exception as e:
+        print(f"Error in fetching: {e}")
+        bot.edit_message_text(f"حصلت مشكلة في قراءة الرابط:\n`{str(e)[:150]}`", chat_id, msg.message_id, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('res_'))
 def download_selected_quality(call):
@@ -110,13 +125,13 @@ def download_selected_quality(call):
             except Exception:
                 pass
 
-    ydl_opts = {
+    ydl_opts = dict(YTDL_BASE_OPTS)
+    ydl_opts.update({
         'format': f'bestvideo[height<={res}]+bestaudio/best[height<={res}]',
         'outtmpl': f'video_{chat_id}.%(ext)s',
-        'quiet': True,
         'merge_output_format': 'mp4',
         'progress_hooks': [progress_hook]
-    }
+    })
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -130,11 +145,11 @@ def download_selected_quality(call):
             
         os.remove(filename)
         bot.delete_message(chat_id, message_id)
-    except Exception:
+    except Exception as e:
+        print(f"Error in download: {e}")
         try:
-            bot.edit_message_text("❌ حدث خطأ أثناء التحميل أو الرفع.", chat_id, message_id)
+            bot.edit_message_text(f"❌ خطأ أثناء التحميل:\n`{str(e)[:150]}`", chat_id, message_id, parse_mode="Markdown")
         except Exception:
             pass
 
 bot.polling()
-
