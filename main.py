@@ -8,17 +8,20 @@ TOKEN = '8996530159:AAEIwyVSeMk6E7zlOLBpIMX79TKIc_EngFs'  # حط التوكن ب
 bot = telebot.TeleBot(TOKEN)
 user_urls = {}
 
-# إعدادات عامة لتخطي حظر يوتيوب على السيرفرات
+# إعدادات تخطي حظر يوتيوب على السيرفرات السحابية
 YTDL_BASE_OPTS = {
     'quiet': True,
     'no_warnings': True,
+    'extract_flat': False,
     'extractor_args': {
         'youtube': {
-            'player_client': ['android', 'ios', 'mweb']
+            'player_client': ['ios', 'android', 'web_safari'],
+            'player_skip': ['webpage', 'configs', 'js']
         }
     },
     'http_headers': {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+        'Accept-Language': 'en-US,en;q=0.9',
     }
 }
 
@@ -153,3 +156,4 @@ def download_selected_quality(call):
             pass
 
 bot.polling()
+
