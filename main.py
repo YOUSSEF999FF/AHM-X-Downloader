@@ -8,17 +8,17 @@ TOKEN = '8996530159:AAEIwyVSeMk6E7zlOLBpIMX79TKIc_EngFs'  # حط التوكن ب
 bot = telebot.TeleBot(TOKEN)
 user_urls = {}
 
-# إعدادات تخطي الحظر
+# إعدادات محدثة لتخطي حظر يوتيوب على السيرفرات السحابية
 YTDL_BASE_OPTS = {
     'quiet': True,
     'no_warnings': True,
     'extractor_args': {
         'youtube': {
-            'player_client': ['ios', 'android', 'mweb']
+            'player_client': ['web_safari', 'web']
         }
     },
     'http_headers': {
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15',
         'Accept-Language': 'en-US,en;q=0.9',
     }
 }
@@ -37,7 +37,6 @@ def get_progress_bar(percent):
     return f"[{bar}] {percent}%"
 
 def safe_edit(chat_id, message_id, text, reply_markup=None, parse_mode=None):
-    """دالة آمنة لتعديل الرسائل بدون ما البوت يفصل لو الرسالة اتمسحت"""
     try:
         bot.edit_message_text(text, chat_id, message_id, reply_markup=reply_markup, parse_mode=parse_mode)
     except Exception as e:
@@ -173,7 +172,6 @@ def download_selected_quality(call):
         print(f"Error in download: {e}")
         safe_edit(chat_id, message_id, f"❌ خطأ أثناء التحميل:\n`{str(e)[:150]}`", parse_mode="Markdown")
 
-# حلقة تشغيل متواصلة تحمي البوت من التوقف تلقائياً عند حدوث أي خطأ
 if __name__ == '__main__':
     while True:
         try:
@@ -182,4 +180,3 @@ if __name__ == '__main__':
         except Exception as e:
             print(f"Polling error encountered: {e}")
             time.sleep(5)
-
