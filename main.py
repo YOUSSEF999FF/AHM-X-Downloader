@@ -1,63 +1,96 @@
-import telebot
-import requests
 import os
+import random
+import time
+from threading import Thread
+from flask import Flask
+import telebot
 
-TOKEN = '8996530159:AAEIwyVSeMk6E7zlOLBpIMX79TKIc_EngFs'  # استبدل ده بتوكن البوت بتاعك
+# إنشاء سيرفر وهمي لتجاوز فحص Port الخاص بـ Render المجاني
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is running 24/7!"
+
+def run():
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.daemon = True
+    t.start()
+
+# التوكن الخاص بك
+TOKEN = "8845591454:AAEKrxoIJQFt-xbPHT8CzLN1Mix7ii0NLho"
 bot = telebot.TeleBot(TOKEN)
 
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    bot.reply_to(message, "أهلاً بيك يا أحمد! البوت شغال بالنظام الجديد السريع 🚀\nارسل رابط الفيديو وسيتم تحميلة فوراً.")
+ROASTS = [
+    "يا ساتر! حاسس إن السيرفر هنج من كثرة الـ IQ العالي اللي في الرسالة دي 🧠⚡",
+    "نصيحة أخوية: فكر مرتين قبل ما تكتب المرة الجاية 😅",
+    "ما شاء الله، إجابة غير متوقعة ومحدش طلبها أساساً! 🎯",
+]
 
-@bot.message_handler(func=lambda message: 'http' in message.text)
-def download_video(message):
-    url = message.text.strip()
-    chat_id = message.chat.id
-    msg = bot.reply_to(message, "جاري جلب الفيديو وتخطي حظر يوتيوب... ⏳")
+@bot.message_handler(content_types=['new_chat_members'])
+def welcome_new_member(message):
+    for member in message.new_chat_members:
+        welcome_text = f"نورت الجروب يا {member.first_name}! 🎉\nالقوانين بسيطة: ممنوع الإعلانات، وممنوع تزعل الأدمن، والشاي بـ 5 جنيه ☕😂"
+        bot.reply_to(message, welcome_text)
 
+@bot.message_handler(commands=['ban'])
+def ban_user(message):
+    if not message.reply_to_message:
+        bot.reply_to(message, "اعمل رد (Reply) على رسالة الشخص اللي عايز تطرده! 🎯")
+        return
+    target = message.reply_to_message.from_user
     try:
-        # طلب رابط التحميل من Cobalt API
-        api_url = "https://api.cobalt.tools/"
-        payload = {
-            "url": url,
-            "videoQuality": "720"  # جودة 720p ممتازة ومناسبة
-        }
-        headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json"
-        }
+        bot.ban_chat_member(message.chat.id, target.id)
+        bot.reply_to(message, f"تم إرسال العضو {target.first_name} لكوكب آخر بدون عودة! 🚀👋")
+    except Exception:
+        bot.reply_to(message, "تأكد إن البوت أدمن ومعه صلاحية الحظر يا غالي! 😅")
 
-        response = requests.post(api_url, json=payload, headers=headers)
-        data = response.json()
+@bot.message_handler(commands=['mute'])
+def mute_user(message):
+    if not message.reply_to_message:
+        bot.reply_to(message, "اعمل رد (Reply) على رسالة الشخص اللي عايز تكتمه! 🤫")
+        return
+    target = message.reply_to_message.from_user
+    try:
+        bot.restrict_chat_member(message.chat.id, target.id, until_date=int(time.time()) + 600, can_send_messages=False)
+        bot.reply_to(message, f"تم كتم {target.first_name} لمدة 10 دقائق.. روح اشرب شاي وروّق أعصابك ☕🤐")
+    except Exception:
+        bot.reply_to(message, "ما قدرتش أكتمه، تأكد من صلاحيات البوت! 🤷‍♂️")
 
-        if response.status_code == 200 and data.get("status") in ["tunnel", "redirect", "picker"]:
-            download_link = data.get("url")
-            
-            bot.edit_message_text("📥 جاري تنزيل الفيديو ورفعه للتليجرام...", chat_id, msg.message_id)
+@bot.message_handler(commands=['kick'])
+def kick_user(message):
+    if not message.reply_to_message:
+        bot.reply_to(message, "اعمل رد (Reply) على الشخص اللي عايز تطلعه برة الجروب! 🚪")
+        return
+    target = message.reply_to_message.from_user
+    try:
+        bot.unban_chat_member(message.chat.id, target.id)
+        bot.reply_to(message, f"تم إخراج {target.first_name} لتهوية الجروب، وتقدر ترجع لما تهدأ 🚪✨")
+    except Exception:
+        bot.reply_to(message, "فشل الطرد، ابحث عن أدمن أقوى مني! 🤖")
 
-            # تحميل الملف سحابياً
-            video_req = requests.get(download_link, stream=True)
-            filename = f"video_{chat_id}.mp4"
+@bot.message_handler(commands=['roast'])
+def roast_user(message):
+    funny_msg = random.choice(ROASTS)
+    if message.reply_to_message:
+        bot.reply_to(message.reply_to_message, funny_msg)
+    else:
+        bot.reply_to(message, funny_msg)
 
-            with open(filename, 'wb') as f:
-                for chunk in video_req.iter_content(chunk_size=8192):
-                    f.write(chunk)
+@bot.message_handler(func=lambda msg: True)
+def auto_reply(message):
+    text = message.text.lower() if message.text else ""
+    if "مين الأدمن" in text or "من الأدمن" in text:
+        bot.reply_to(message, "الأدمن مشغول بيكتب كود جديد للجروب دلوقتي 🫡👨‍💻")
+    elif "السلام عليكم" in text:
+        bot.reply_to(message, "وعليكم السلام ورحمة الله وبركاته! نورت الساحة 🌟")
+    elif text.strip() == "بوت":
+        bot.reply_to(message, "نعمين؟ البوت في الخدمة وجاهز للشغاوة 🤖🔥")
 
-            # رفع الفيديو للمستخدم
-            with open(filename, 'rb') as video_file:
-                bot.send_video(chat_id, video_file)
-
-            # تنظيف الملفات الموقتة
-            os.remove(filename)
-            bot.delete_message(chat_id, msg.message_id)
-
-        else:
-            error_msg = data.get("text", "مقدرتش اجيب رابط مباشر للفيديو ده.")
-            bot.edit_message_text(f"❌ خطأ: {error_msg}", chat_id, msg.message_id)
-
-    except Exception as e:
-        print(f"Error: {e}")
-        bot.edit_message_text("❌ حصل خطأ أثناء معالجة الرابط، جرب رابط تاني.", chat_id, msg.message_id)
-
-if __name__ == '__main__':
-    bot.polling(non_stop=True)
+# تشغيل السيرفر الوهمي ثم البوت
+keep_alive()
+bot.infinity_polling()
