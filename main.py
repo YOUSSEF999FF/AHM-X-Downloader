@@ -22,7 +22,7 @@ def keep_alive():
     t.start()
 
 # التوكن الخاص بك
-TOKEN = "8845591454:AAEKrxoIJQFt-xbPHT8CzLN1Mix7ii0NLho"
+TOKEN = "8845591454:AAG1YE3OdLI74vOy7UZQAB5NOaREIlk32u8"
 bot = telebot.TeleBot(TOKEN)
 
 ROASTS = [
