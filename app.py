@@ -756,76 +756,132 @@ async def auth_from_header(x_telegram_init_data: str | None = Header(default=Non
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Start the web API and Telegram webhook with phase-specific diagnostics."""
     global bot_app, WEBHOOK_SECRET
-    store.init_db()
-    interrupted = store.recover_interrupted_jobs()
-    if interrupted:
-        LOG.warning("Marked %s queued/running jobs as interrupted after process restart", interrupted)
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    if not BOT_TOKEN:
-        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN environment variable")
-    if OWNER_ID < 1:
-        raise RuntimeError("Set OWNER_ID to your numeric Telegram user ID")
-    if not PUBLIC_URL.startswith("https://"):
-        raise RuntimeError("Set RENDER_EXTERNAL_URL or WEBAPP_URL to the public HTTPS URL")
-    if not WEBHOOK_SECRET:
-        WEBHOOK_SECRET = secrets.token_urlsafe(32)
-        LOG.warning("WEBHOOK_SECRET was not configured; generated for this process. Set a stable value in Render Environment Variables.")
-    if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", WEBHOOK_SECRET):
-        raise RuntimeError("WEBHOOK_SECRET can contain only letters, digits, underscores and hyphens")
-    request = HTTPXRequest(connection_pool_size=24, connect_timeout=25, read_timeout=180, write_timeout=180, pool_timeout=30)
-    bot_app = Application.builder().token(BOT_TOKEN).request(request).concurrent_updates(8).build()
-    set_error_notifier(notify_owner)
-    cleaner_task = asyncio.create_task(cleanup_loop(), name="ahmx-cleanup")
-    bot_app.add_handler(CommandHandler("start", cmd_start))
-    bot_app.add_handler(CommandHandler("help", cmd_help))
-    bot_app.add_handler(CommandHandler("id", cmd_id))
-    bot_app.add_handler(CommandHandler("cancel", cmd_cancel))
-    bot_app.add_handler(CommandHandler("history", cmd_history))
-    bot_app.add_handler(CommandHandler("panel", cmd_panel))
-    bot_app.add_handler(CommandHandler("status", cmd_status))
-    bot_app.add_handler(CommandHandler("maintenance", cmd_maintenance))
-    bot_app.add_handler(CommandHandler("set", cmd_set))
-    bot_app.add_handler(CommandHandler("admin", cmd_admin))
-    bot_app.add_handler(CommandHandler("errors", cmd_errors))
-    bot_app.add_handler(MessageHandler(filters.COMMAND, handle_unknown_command))
-    bot_app.add_handler(CallbackQueryHandler(callback_handler))
-    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    bot_app.add_handler(MessageHandler(filters.ALL, handle_other_message))
-    bot_app.add_error_handler(telegram_error_handler)
-    await bot_app.initialize()
-    await bot_app.start()
-    await bot_app.bot.set_webhook(url=f"{PUBLIC_URL}/telegram", secret_token=WEBHOOK_SECRET, allowed_updates=["message", "callback_query"], drop_pending_updates=False)
+    phase = "database initialization"
+    cleaner_task: asyncio.Task | None = None
+    initialized = False
+    started = False
+
+    async def close_partial_startup() -> None:
+        nonlocal cleaner_task, initialized, started
+        if cleaner_task is not None:
+            cleaner_task.cancel()
+            try:
+                await cleaner_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                LOG.exception("Error stopping cleanup task")
+            cleaner_task = None
+        if bot_app is not None:
+            if started:
+                try:
+                    await bot_app.stop()
+                except Exception:
+                    LOG.exception("Error stopping Telegram application")
+                started = False
+            if initialized:
+                try:
+                    await bot_app.shutdown()
+                except Exception:
+                    LOG.exception("Error shutting down Telegram application")
+                initialized = False
+
     try:
-        await bot_app.bot.set_my_commands([
-            BotCommand("start", "ابدأ استخدام البوت"), BotCommand("help", "شرح الاستخدام"),
-            BotCommand("history", "سجل التنزيلات"), BotCommand("cancel", "إلغاء التنزيل"),
-            BotCommand("id", "معرفة Telegram ID"), BotCommand("panel", "لوحة الإدارة"),
-        ])
-    except TelegramError:
-        LOG.exception("Could not register bot commands")
-    if PUBLIC_URL.startswith("https://"):
+        store.init_db()
+        interrupted = store.recover_interrupted_jobs()
+        if interrupted:
+            LOG.warning("Marked %s queued/running jobs as interrupted after process restart", interrupted)
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+        phase = "environment validation"
+        if not BOT_TOKEN:
+            raise RuntimeError("Missing TELEGRAM_BOT_TOKEN environment variable")
+        if OWNER_ID < 1:
+            raise RuntimeError("Set OWNER_ID to your numeric Telegram user ID")
+        if not PUBLIC_URL.startswith("https://"):
+            raise RuntimeError("Set RENDER_EXTERNAL_URL or WEBAPP_URL to the public HTTPS URL")
+        if not WEBHOOK_SECRET:
+            WEBHOOK_SECRET = secrets.token_urlsafe(32)
+            LOG.warning("WEBHOOK_SECRET was not configured; generated for this process. Set a stable value in Render Environment Variables.")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", WEBHOOK_SECRET):
+            raise RuntimeError("WEBHOOK_SECRET can contain only letters, digits, underscores and hyphens")
+
+        phase = "Telegram client setup"
+        request = HTTPXRequest(connection_pool_size=24, connect_timeout=25, read_timeout=180, write_timeout=180, pool_timeout=30)
+        bot_app = Application.builder().token(BOT_TOKEN).request(request).concurrent_updates(8).build()
+        set_error_notifier(notify_owner)
+        bot_app.add_handler(CommandHandler("start", cmd_start))
+        bot_app.add_handler(CommandHandler("help", cmd_help))
+        bot_app.add_handler(CommandHandler("id", cmd_id))
+        bot_app.add_handler(CommandHandler("cancel", cmd_cancel))
+        bot_app.add_handler(CommandHandler("history", cmd_history))
+        bot_app.add_handler(CommandHandler("panel", cmd_panel))
+        bot_app.add_handler(CommandHandler("status", cmd_status))
+        bot_app.add_handler(CommandHandler("maintenance", cmd_maintenance))
+        bot_app.add_handler(CommandHandler("set", cmd_set))
+        bot_app.add_handler(CommandHandler("admin", cmd_admin))
+        bot_app.add_handler(CommandHandler("errors", cmd_errors))
+        bot_app.add_handler(MessageHandler(filters.COMMAND, handle_unknown_command))
+        bot_app.add_handler(CallbackQueryHandler(callback_handler))
+        bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+        bot_app.add_handler(MessageHandler(filters.ALL, handle_other_message))
+        bot_app.add_error_handler(telegram_error_handler)
+
+        phase = "Telegram application initialization / validating bot token"
+        await bot_app.initialize()
+        initialized = True
+
+        phase = "Telegram application start"
+        await bot_app.start()
+        started = True
+
+        phase = "registering Telegram webhook"
+        await bot_app.bot.set_webhook(
+            url=f"{PUBLIC_URL}/telegram",
+            secret_token=WEBHOOK_SECRET,
+            allowed_updates=["message", "callback_query"],
+            drop_pending_updates=False,
+        )
+
+        phase = "registering Telegram commands"
+        try:
+            await bot_app.bot.set_my_commands([
+                BotCommand("start", "ابدأ استخدام البوت"), BotCommand("help", "شرح الاستخدام"),
+                BotCommand("history", "سجل التنزيلات"), BotCommand("cancel", "إلغاء التنزيل"),
+                BotCommand("id", "معرفة Telegram ID"), BotCommand("panel", "لوحة الإدارة"),
+            ])
+        except TelegramError:
+            LOG.exception("Could not register bot commands; service startup will continue")
         try:
             await bot_app.bot.set_chat_menu_button(menu_button=None)
         except TelegramError:
-            pass
-    LOG.info("AHM X Downloader V4 is running at %s", PUBLIC_URL)
+            LOG.debug("Could not reset Telegram chat menu button", exc_info=True)
+
+        phase = "starting cleanup task"
+        cleaner_task = asyncio.create_task(cleanup_loop(), name="ahmx-cleanup")
+        LOG.info("AHM X Downloader V4 started successfully at %s", PUBLIC_URL)
+    except Exception as exc:
+        # The normal traceback shows the root exception; this line makes the startup
+        # phase unmistakable in Render Logs, so a truncated log is easier to diagnose.
+        LOG.exception("FATAL STARTUP ERROR during phase=%s (%s): %s", phase, type(exc).__name__, exc)
+        try:
+            error_id = capture_exception(exc, source=f"startup:{phase}")
+            LOG.error("Startup diagnostic id=%s phase=%s", error_id, phase)
+        except Exception:
+            LOG.exception("Could not persist startup diagnostic (the database may be unavailable)")
+        await close_partial_startup()
+        bot_app = None
+        raise RuntimeError(f"AHM X startup failed during [{phase}]: {type(exc).__name__}: {exc}") from exc
+
     try:
         yield
     finally:
-        cleaner_task.cancel()
-        try:
-            await cleaner_task
-        except asyncio.CancelledError:
-            pass
-        if bot_app:
-            try:
-                await bot_app.bot.delete_webhook(drop_pending_updates=False)
-                await bot_app.stop()
-                await bot_app.shutdown()
-            except Exception:
-                LOG.exception("Error while shutting down Telegram bot")
+        await close_partial_startup()
+        # Keep the Telegram webhook registered during normal restarts/deploys.
+        # Telegram can queue updates while Render replaces this process.
         bot_app = None
 
 
