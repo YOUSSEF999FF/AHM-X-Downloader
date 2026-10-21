@@ -1,120 +1,77 @@
-# AHM X Downloader V2.0.2 — Telegram Bot + Mini App 🔴⚫
+# AHM X Downloader Bot V3 🔴⚫
 
-واجهة عربية/إنجليزية بتصميم أحمر داكن وأسود، مع بوت Telegram وMini App وBackend مبني على FastAPI و`yt-dlp`.
+Telegram video/audio downloader bot for Render **Web Service**. This version intentionally focuses on the Telegram bot; the Mini App is deferred until the core bot is stable.
 
-> **الاستخدام المسؤول:** استخدمه فقط لتنزيل محتوى تملكه أو تملك إذنًا بتنزيله، وبما يتوافق مع شروط المنصة وحقوق النشر. المشروع لا يضيف Cookies أو حسابات، ولا يحاول تجاوز DRM أو تسجيل الدخول أو قيود الوصول. بعض الروابط لن تعمل إذا كانت المنصة تمنع التنزيل أو غيّرت نظامها.
+## Features
 
-## المزايا
+- Send a public video URL; the bot tries `yt-dlp` metadata extraction.
+- Displays title, uploader, duration, views (when available), and thumbnail (when available).
+- Inline buttons for available video resolutions and MP3 audio extraction.
+- Estimated sizes where metadata makes a reasonable estimate possible.
+- Progress/status edits and a cancel button during downloads.
+- Conservative Telegram upload cap (default 47 MiB (conservative margin under the cloud Bot API limit)), checked during and after downloading.
+- Private-chat-only downloads; optional `ALLOWED_USER_IDS` allowlist and admin commands.
+- Temporary files are deleted after each job.
+- FastAPI `/health` endpoint keeps it deployable as a Render Web Service and reports `yt-dlp`, `yt-dlp-ejs`, Node and FFmpeg versions.
+- Uses Telegram webhook; no polling loop is required.
 
-- Mini App متجاوب للموبايل بواجهة AHM X حمراء/سوداء بتأثيرات زجاجية.
-- بوت Telegram مع `/start` و`/app` و`/help`، وزر لفتح الـ Mini App.
-- التحقق من Telegram `initData` على الخادم باستخدام HMAC-SHA-256 ورفض الجلسات القديمة.
-- تحليل رابط عام وإظهار العنوان، الناشر، المدة، المشاهدات والصورة المصغّرة عند توفرها.
-- اختيار الدقة من الجودات المتاحة حتى 1080p افتراضيًا، مع حجم تقريبي، أو اختيار MP3.
-- طريقتا استلام: إرسال الملف داخل تيليجرام، أو رابط تنزيل مباشر مؤقت.
-- سجل للعمليات في الذاكرة الحالية، وصفحة إعدادات وتبديل عربي/إنجليزي.
-- لوحة مشرف محدودة بواسطة `ADMIN_IDS` مع إحصاءات الجلسة الحالية ومفتاح صيانة.
-- حذف تلقائي للملفات المؤقتة بعد الإرسال أو استخدام الرابط أو انتهاء صلاحيته.
-- مسار فحص `/health` لتكامل Render.
+## Important platform limitation
 
-## حدود لازم تعرفها
+`yt-dlp` supports many sites, but support changes and not every URL will work. YouTube may reject a Render IP with `Sign in to confirm you're not a bot`; the bot will show a clear failure. The code does not bypass sign-in/anti-bot challenges or use account cookies. Updating `yt-dlp` and installing its JS runtime helps with ordinary extraction compatibility but cannot force a platform to serve a video.
 
-- **حد تيليجرام في الإعداد الافتراضي:** التطبيق يضع سقفًا 49 MB لتفادي تجاوز الحد الشائع لرفع Bot API السحابي، لكن الحدود قد تتغير من Telegram.
-- **التنزيل المباشر:** سقفه الافتراضي 150 MB. نجاحه يعتمد على موارد الخادم، ومساحة الملفات المؤقتة، والمنصة المصدر.
-- **الحجم تقديري:** الحجم النهائي قد يختلف بعد دمج الصوت والفيديو أو إعادة ترميز الصوت.
-- **دعم المنصات غير مضمون:** `yt-dlp` يدعم مواقع عديدة، لكن المواقع تتغير باستمرار؛ ولا يوجد وعد أن كل رابط من كل موقع سيعمل.
-- **Render Free:** خدمة الويب المجانية قد تتوقف بعد 15 دقيقة من عدم وجود طلبات، والملفات المحلية المؤقتة وقاعدة الذاكرة تختفي عند إعادة التشغيل/إعادة النشر/الإيقاف. لذلك سجل العمليات وإحصاءات لوحة الإدارة ليسا سجلًا دائمًا. راجع القيود الحالية قبل الاعتماد على الخدمة في استخدام مستمر.
-- Mini App لا تعمل بأمان إذا فُتحت كصفحة عامة من خارج Telegram؛ استخدم زر البوت، لأن الخادم يتحقق من `initData`.
+## Deploy to Render (mobile-friendly)
 
-## تجهيز البوت
+1. Download this ZIP and extract it.
+2. Create a GitHub repository and upload the **contents** of this folder to the repository root. `Dockerfile` and `render.yaml` should be at the root.
+3. In Render, choose **New → Blueprint** and connect that repository. Render creates a **Web Service**, not a Background Worker.
+4. Add `TELEGRAM_BOT_TOKEN` from `@BotFather` as a secret/environment variable. The Blueprint generates `WEBHOOK_SECRET` automatically.
+5. Fill `ADMIN_IDS` with your numeric Telegram ID. You can get it by opening the bot and sending `/id`. Optional: set `ALLOWED_USER_IDS` to a comma-separated allowlist. If left empty, any user can use it in private chat.
+6. Deploy, then open `https://YOUR-SERVICE.onrender.com/health`. Verify it returns `status: ok`, `yt_dlp_ejs` is not `missing`, Node is `v22.x`, and FFmpeg is available.
+7. Open the Telegram bot and send `/start`, then test a short public video from a site that permits access.
 
-1. افتح `@BotFather` في Telegram، أنشئ بوتًا جديدًا، واحفظ التوكن في مكان آمن.
-2. جهّز مستودع GitHub جديدًا، ثم ارفع **محتويات هذا المجلد** إلى جذر المستودع. تأكد أن `Dockerfile` و`render.yaml` و`app.py` في الجذر.
-3. المشروع مهيأ كـ **Render Web Service** (ليس Background Worker)، لأن الخدمة تستضيف واجهة الـ Mini App وتستقبل Telegram webhook عبر HTTPS. أسهل نشر هو **New + → Blueprint** وربط المستودع؛ ملف `render.yaml` ينشئ Web Service تلقائيًا. ولو اخترت **New + → Web Service** يدويًا، استخدم Runtime = Docker وسيب `Dockerfile` كملف البناء.
-4. أدخل قيمة `TELEGRAM_BOT_TOKEN`. يتم إنشاء `WEBHOOK_SECRET` تلقائيًا من Blueprint؛ عند الإنشاء اليدوي أضف متغيرًا سريًا عشوائيًا لهذا الاسم.
-5. املأ `BOT_USERNAME` باسم البوت بدون `@`، و`ADMIN_IDS` بمعرّف Telegram الرقمي لحساب المشرف. اترك `ADMIN_IDS` فارغًا إذا لم تكن تريد لوحة الإدارة.
-6. انشر الخدمة وانتظر أن يرجع المسار `/health` قيمة `{"status":"ok"}`.
-7. في `@BotFather` استخدم `/setdomain` واضبطه على نطاق الخدمة الذي أعطاك إياه Render (اسم النطاق فقط، مثل `your-app.onrender.com`). إن كان الخيار غير مطلوب لنوع تشغيلك الحالي فسيظل زر الـ Mini App الموجود في `/start` هو المدخل الأساسي.
-8. افتح البوت في Telegram واضغط Start، ثم اضغط زر **افتح AHM X Downloader**. اختبر أولًا رابطًا عامًا صغيرًا يحق لك تنزيله.
+For an existing Render service, push these files to the same repository and trigger **Manual Deploy → Clear build cache & deploy** so Docker installs the dependencies again.
 
-## استكشاف أخطاء Mini App وYouTube
+## Environment variables
 
-- إذا ظهرت صفحة `Internal Server Error` عند فتح التطبيق، افتح `https://YOUR-SERVICE.onrender.com/health` وتأكد أن الحالة `ok`، ثم راجع Render → Logs في نفس وقت الخطأ. النسخة الحالية تسجل الاستثناءات غير المتوقعة مع مسار الطلب، وتعرض تعليمات واضحة إذا كان `web/index.html` غير موجود. تأكد من رفع المجلد `web/` كاملًا إلى GitHub مع `index.html` و`style.css` و`app.js`.
-- إذا رفض YouTube الطلب برسالة `Sign in to confirm you're not a bot`، فهذا رفض من المنصة/عنوان الاستضافة وليس خطأ في واجهة Mini App. النسخة الحالية تعرض رسالة مفهومة بدل نص طويل. تم ضبط Node.js 22+ وتثبيت `yt-dlp-ejs` صراحةً، مع تحديد مسار Node وإظهار إصدارات `yt-dlp` و`yt-dlp-ejs` وNode في `/health`. هذا يطابق إعداد JavaScript الذي توصي به مراجع yt-dlp ومشاريع GitHub مشابهة، لكنه لا يلغي قرار YouTube برفض عنوان الاستضافة. لا تحاول إدخال ملفات تعريف ارتباط شخصية أو أسرار حساب داخل المستودع؛ البوت لا يتجاوز تسجيل الدخول أو حماية المنصة، وقد لا تكون بعض فيديوهات YouTube متاحة من استضافة عامة.
-- تغيّر حد الاعتماد الأدنى إلى yt-dlp 2026.08.19. بعد رفع التعديلات، نفّذ **Manual Deploy → Clear build cache & deploy** في Render للتأكد من بناء الاعتماديات من جديد.
+| Variable | Required | Purpose |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | Yes | Bot token from BotFather. Keep secret. |
+| `WEBHOOK_SECRET` | Render Blueprint generates it | Authenticates Telegram webhook requests. |
+| `WEBHOOK_URL` | Local only if `RENDER_EXTERNAL_URL` is absent | Public HTTPS service URL. Render usually supplies `RENDER_EXTERNAL_URL`. |
+| `ADMIN_IDS` | Optional | Comma-separated numeric Telegram admin IDs. |
+| `ALLOWED_USER_IDS` | Optional | Comma-separated IDs allowed to use the bot; empty means no allowlist. |
+| `MAX_UPLOAD_MB` | No | Upload limit, clamped to 5–47 MiB. |
+| `MAX_VIDEO_HEIGHT` | No | Highest quality button, default 1080. |
+| `MAX_ACTIVE_DOWNLOADS` | No | Concurrent downloads, default 1. |
+| `REQUEST_COOLDOWN_SECONDS` | No | Per-user cooldown between URL submissions. |
+| `LOG_LEVEL` | No | Logging verbosity. |
+| `YTDLP_NODE_PATH` | No | Node.js path for yt-dlp JavaScript compatibility. |
 
-## تحديث التوافق مع YouTube (V2.0.2)
+## Commands
 
-تم تطبيق نمط التوافق الذي توصي به وثائق `yt-dlp` وبعض مشاريع GitHub المشابهة: تثبيت `yt-dlp-ejs` كاعتماد صريح، تشغيل Node.js 22+ عبر مسار محدد، وإظهار نسخ المكونات في `/health`. لا يضيف هذا التحديث ملفات جلسات أو Cookies شخصية ولا يتجاوز تسجيل الدخول أو رفض المنصة. إذا استمرت رسالة `Sign in to confirm you're not a bot` بعد التأكد من أن `yt_dlp_ejs` ليس `missing` وأن Node يظهر إصدارًا مثل `v22.x`، فالمشكلة صادرة من قرار YouTube تجاه طلبات الاستضافة، وليست خطأ في واجهة Mini App؛ البوت سيعرض رسالة مفهومة بدل نص تقني طويل.
+- `/start` — welcome and basics
+- `/help` — usage instructions
+- `/cancel` — ask to cancel the current download
+- `/id` — show your Telegram user ID
+- `/status` — admin-only operational status
+- `/maintenance on` and `/maintenance off` — admin-only maintenance mode
 
-مراجع المقارنة: [yt-dlp EJS setup](https://github.com/yt-dlp/yt-dlp/wiki/ejs)، [yt-dlp-telegram](https://github.com/ssebastianoo/yt-dlp-telegram)، [VideoDownloaderBot](https://github.com/Avazbek22/VideoDownloaderBot).
+## Local Docker run
 
-## إعدادات البيئة
-
-| المتغير | الافتراضي | وظيفته |
-|---|---:|---|
-| `TELEGRAM_BOT_TOKEN` | مطلوب | توكن البوت، يوضع في Render Secrets فقط |
-| `WEBHOOK_SECRET` | مولّد في Render | حماية Telegram webhook |
-| `BOT_USERNAME` | فارغ | اسم البوت دون `@` لزر الرجوع إليه |
-| `ADMIN_IDS` | فارغ | معرّفات المشرفين مفصولة بفواصل |
-| `MAX_UPLOAD_MB` | `49` | سقف ملف الإرسال داخل تيليجرام |
-| `MAX_DIRECT_DOWNLOAD_MB` | `150` | سقف التنزيل المباشر المؤقت |
-| `MAX_VIDEO_HEIGHT` | `1080` | أعلى ارتفاع يعرضه اختيار الجودة |
-| `MAX_ACTIVE_DOWNLOADS` | `1` | أقصى عدد عمليات تنزيل متزامنة على الخدمة |
-| `LOG_LEVEL` | `INFO` | مستوى التسجيل في Logs |
-| `YTDLP_NODE_PATH` | `/usr/local/bin/node` في Render | مسار Node.js المستخدم لحل تحديات JavaScript العادية |
-
-## تشغيل محلي عبر Docker
-
-1. انسخ `.env.example` إلى `.env` واملأ التوكن والسر.
-2. يلزم رابط HTTPS عام لاستقبال Telegram webhook؛ يمكن استخدام عنوان HTTPS لخدمة الاستضافة بعد النشر.
-3. شغّل:
+1. Copy `.env.example` to `.env` and set the token, HTTPS `WEBHOOK_URL`, and `WEBHOOK_SECRET`.
+2. Run:
 
 ```bash
-docker build -t ahm-x-downloader .
-docker run --env-file .env -p 10000:10000 \
-  -e WEBHOOK_URL=https://your-public-https-domain.example \
-  ahm-x-downloader
+docker build -t ahm-x-downloader-bot .
+docker run --env-file .env -p 10000:10000 -e PORT=10000 ahm-x-downloader-bot
 ```
 
-استبدل نطاق المثال بعنوان HTTPS فعلي. لا ترفع ملف `.env` إلى GitHub.
+Telegram must be able to reach the HTTPS URL in `WEBHOOK_URL`; plain localhost will not receive Telegram webhooks unless you provide a secure public tunnel.
 
-## البنية
+## Testing notes
 
-```text
-.
-├── app.py                 # Telegram bot + FastAPI + Mini App API
-├── web/
-│   ├── index.html         # Mini App interface
-│   ├── style.css          # Responsive dark-red glass UI
-│   └── app.js             # UI, auth payload, polling, language, pages
-├── requirements.txt
-├── Dockerfile             # Python, ffmpeg, Node runtime
-├── render.yaml            # Render Blueprint
-├── .env.example
-├── .gitignore
-└── README.md
-```
+The package was statically checked for Python syntax, YAML validity, Docker/config presence, and expected core helper behavior. It has not been connected to your real Telegram bot token and a real Render deployment from this environment, so the first live deployment still needs a short smoke test.
 
-## الخصوصية والأمان
+## Open-source reference notes
 
-- لا ترسل توكن البوت لأي شخص ولا تضعه في ملفات الواجهة الأمامية.
-- لا تضع مفاتيح سرية في GitHub. أضفها في Environment/Secrets على Render.
-- يجري التحقق من `initData` في Backend؛ ولا يعتمد على `initDataUnsafe` كإثبات هوية.
-- روابط التنزيل المباشر تستخدم رمزًا عشوائيًا مؤقتًا ويُحذف الملف بعد تنزيله أو انتهاء صلاحيته.
-- السجل والإحصاءات في الذاكرة الحالية وليست دائمة. للاستعمال طويل المدى أضف قاعدة بيانات وملف تخزين مناسبين بخطة استضافة ملائمة.
-
-## استكشاف الأخطاء
-
-- **الخدمة لا تبدأ:** تأكد من إدخال `TELEGRAM_BOT_TOKEN` ووجود `WEBHOOK_URL` أو `RENDER_EXTERNAL_URL` عند التشغيل.
-- **Mini App تقول افتح من Telegram:** هذا مقصود للحماية؛ افتح الواجهة من زر البوت داخل Telegram.
-- **فشل الرابط:** جرّب فيديو عامًا مسموحًا تنزيله؛ بعض المواقع لا تدعم التنزيل أو قد تتطلب تسجيل دخول، والبوت لا يتجاوز ذلك.
-- **الملف كبير:** اختر دقة أقل، أو استخدم التنزيل المباشر إذا كان حجمه المتوقع داخل الحد المضبوط.
-- **أول فتح بطيء على Render Free:** الخادم قد يكون نام بعد الخمول ويحتاج بعض الوقت ليستيقظ.
-
-## مراجع تقنية
-
-- Telegram Mini Apps: https://core.telegram.org/bots/webapps
-- Telegram Bot API: https://core.telegram.org/bots/api
-- yt-dlp supported sites: https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md
-- Render Free limitations: https://render.com/docs/free
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the reference repositories and licensing note. This bundle is a clean implementation inspired by documented features, not a claimed verbatim fork of any repository.

@@ -1,9 +1,13 @@
 .git
-.gitignore
-__pycache__
-*.pyc
+.github
 .venv
 venv
+__pycache__
+*.py[cod]
 .env
+.env.*
+!.env.example
+data
 downloads
-tmp
+logs
+*.log

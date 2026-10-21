@@ -1,10 +1,10 @@
 services:
   - type: web
-    name: ahm-x-downloader-v2
+    name: ahm-x-downloader-bot-v3
     runtime: docker
     plan: free
-    healthCheckPath: /health
     autoDeploy: true
+    healthCheckPath: /health
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
@@ -12,16 +12,16 @@ services:
         generateValue: true
       - key: ADMIN_IDS
         value: ""
-      - key: BOT_USERNAME
+      - key: ALLOWED_USER_IDS
         value: ""
       - key: MAX_UPLOAD_MB
-        value: "49"
-      - key: MAX_DIRECT_DOWNLOAD_MB
-        value: "150"
+        value: "47"
       - key: MAX_VIDEO_HEIGHT
         value: "1080"
       - key: MAX_ACTIVE_DOWNLOADS
         value: "1"
+      - key: REQUEST_COOLDOWN_SECONDS
+        value: "5"
       - key: LOG_LEVEL
         value: INFO
       - key: YTDLP_NODE_PATH
