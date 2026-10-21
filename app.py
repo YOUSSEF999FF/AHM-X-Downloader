@@ -2,30 +2,30 @@ from __future__ import annotations
 
 import asyncio
 import hmac
-import ipaddress
+import json
 import logging
 import os
 import re
+import secrets
 import shutil
-import socket
-import tempfile
 import time
 import uuid
 from contextlib import asynccontextmanager
-from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import yt_dlp
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from telegram import (
     BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Update,
+    WebAppInfo,
 )
 from telegram.constants import ChatType
 from telegram.error import BadRequest, TelegramError
@@ -39,542 +39,556 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 
-# ── Settings ────────────────────────────────────────────────────────────────
-BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or "").strip()
-PUBLIC_URL = (os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").rstrip("/")
-PORT = int(os.getenv("PORT", "10000"))
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
-MAX_UPLOAD_MB = max(5, min(int(os.getenv("MAX_UPLOAD_MB", "47")), 47))
-MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
-MAX_VIDEO_HEIGHT = max(144, min(int(os.getenv("MAX_VIDEO_HEIGHT", "1080")), 2160))
-MAX_ACTIVE_DOWNLOADS = max(1, min(int(os.getenv("MAX_ACTIVE_DOWNLOADS", "1")), 4))
-MAX_JOB_AGE_SECONDS = 20 * 60
-MAX_JOBS = 200
-REQUEST_COOLDOWN_SECONDS = max(0, int(os.getenv("REQUEST_COOLDOWN_SECONDS", "5")))
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-ADMIN_IDS = {int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
-ALLOWED_USER_IDS = {int(x.strip()) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip().isdigit()}
-NODE_PATH = os.getenv("YTDLP_NODE_PATH", shutil.which("node") or "node")
-
-logging.basicConfig(
-    level=LOG_LEVEL,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+import store
+from config import (
+    ADMIN_IDS, BOT_TOKEN, DATA_DIR, DEFAULT_SETTINGS, DOWNLOAD_DIR, OWNER_ID, PORT, PUBLIC_URL,
+    SETTING_SPECS, WEBHOOK_SECRET as ENV_WEBHOOK_SECRET,
 )
-log = logging.getLogger("ahm-x-downloader-bot")
+from diagnostics import capture_exception, capture_message, public_error
+from downloader.common import DownloadCancelled, format_bytes
+from downloader.registry import detect_platform, serializable_info
+from security import WebAppAuthError, validate_init_data
+from service import (
+    active_progress,
+    analyses,
+    analyze_url,
+    build_summary,
+    file_paths,
+    get_live_job,
+    limiter,
+    last_analysis_at,
+    request_cancel,
+    start_download,
+    set_error_notifier,
+    cleanup_loop,
+)
+
+LOG = logging.getLogger("ahmx.v4")
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 
 bot_app: Application | None = None
-jobs: dict[str, dict[str, Any]] = {}
-active_users: set[int] = set()
-active_job_by_user: dict[int, str] = {}
-last_request_at: dict[int, float] = {}
-maintenance_mode = False
-download_semaphore = asyncio.Semaphore(MAX_ACTIVE_DOWNLOADS)
-
-HEIGHT_STEPS = [144, 240, 360, 480, 540, 720, 1080, 1440, 2160]
-MEDIA_EXTENSIONS = {".mp4", ".m4v", ".mkv", ".webm", ".mov", ".mp3", ".m4a", ".aac", ".opus", ".ogg"}
+WEBHOOK_SECRET = ENV_WEBHOOK_SECRET
+last_maintenance_alert: dict[int, float] = {}
 
 
-# ── Errors and utility functions ────────────────────────────────────────────
-class DownloadTooLarge(Exception):
-    pass
+def _clean_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str) and value.lower() in {"true", "on", "yes", "1"}:
+        return True
+    if isinstance(value, str) and value.lower() in {"false", "off", "no", "0"}:
+        return False
+    raise ValueError("القيمة لازم تكون true أو false.")
 
 
-class DownloadCancelled(Exception):
-    pass
+def validate_setting_patch(patch: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(patch, dict) or not patch:
+        raise ValueError("ابعت إعدادات صالحة لتعديلها.")
+    cleaned: dict[str, Any] = {}
+    for key, value in patch.items():
+        spec = SETTING_SPECS.get(key)
+        if not spec:
+            raise ValueError(f"الإعداد {key} غير قابل للتعديل من اللوحة.")
+        kind = spec["type"]
+        if kind == "bool":
+            cleaned[key] = _clean_bool(value)
+        elif kind == "int":
+            try:
+                num = int(value)
+            except (ValueError, TypeError) as exc:
+                raise ValueError(f"قيمة {spec['label']} لازم تكون رقمًا صحيحًا.") from exc
+            if num < int(spec["min"]) or num > int(spec["max"]):
+                raise ValueError(f"قيمة {spec['label']} لازم تكون بين {spec['min']} و{spec['max']}.")
+            cleaned[key] = num
+        elif kind == "str":
+            valid = list(spec.get("choices") or [])
+            if value not in valid:
+                raise ValueError(f"القيمة المتاحة لـ {spec['label']}: {', '.join(valid)}")
+            cleaned[key] = str(value)
+    return cleaned
 
 
-def extract_url(text: str) -> str | None:
-    match = re.search(r"https?://[^\s<>]+", text.strip(), flags=re.IGNORECASE)
-    return match.group(0).rstrip(".,!؟)]}>") if match else None
+def is_maintaining() -> bool:
+    return bool(store.get_settings().get("maintenance_mode", False))
 
 
-def validate_public_url(url: str) -> None:
-    """Reject malformed links, embedded credentials, and private/local hosts."""
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise ValueError("الرابط لازم يبدأ بـ http:// أو https://")
-    if parsed.username or parsed.password:
-        raise ValueError("الروابط اللي تحتوي بيانات دخول مش مسموح بيها.")
-    if len(url) > 4096:
-        raise ValueError("الرابط طويل جدًا.")
+def webapp_button(label: str = "🚀 فتح Mini App") -> InlineKeyboardMarkup | None:
+    if PUBLIC_URL.startswith("https://"):
+        return InlineKeyboardMarkup([[InlineKeyboardButton(label, web_app=WebAppInfo(url=f"{PUBLIC_URL}/app"))]])
+    return None
 
-    host = parsed.hostname.rstrip(".").lower()
-    if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
-        raise ValueError("الرابط لازم يكون من موقع عام على الإنترنت.")
 
-    try:
-        addresses = {ipaddress.ip_address(host)}
-    except ValueError:
+def user_can_download(user_id: int, chat_type: str | None = None) -> bool:
+    settings = store.get_settings()
+    if settings.get("allow_private_chats_only", True) and chat_type and chat_type != "private":
+        return False
+    if is_maintaining() and not store.is_admin(user_id):
+        return False
+    if not settings.get("downloads_enabled", True) and not store.is_admin(user_id):
+        return False
+    return True
+
+
+async def notify_owner(text: str, *, user_id: int = 0, force: bool = False) -> None:
+    settings = store.get_settings()
+    if not settings.get("owner_alerts_enabled", True) or bot_app is None or bot_app.bot is None:
+        return
+    targets = {OWNER_ID} if OWNER_ID > 0 else set()
+    if not targets:
+        targets = set(ADMIN_IDS)
+    for target in targets:
         try:
-            found = socket.getaddrinfo(
-                host,
-                parsed.port or (443 if parsed.scheme == "https" else 80),
-                type=socket.SOCK_STREAM,
-            )
-            addresses = {ipaddress.ip_address(row[4][0]) for row in found}
-        except (socket.gaierror, OSError) as exc:
-            raise ValueError("مش قادر أوصل للدومين الموجود في الرابط. راجع الرابط وجرب تاني.") from exc
-
-    if not addresses or any(not address.is_global for address in addresses):
-        raise ValueError("الرابط لازم يكون من موقع عام على الإنترنت.")
+            await bot_app.bot.send_message(chat_id=target, text=text[:3800], disable_web_page_preview=True)
+        except TelegramError:
+            LOG.debug("Could not notify owner id=%s", target)
 
 
-def ytdlp_options() -> dict[str, Any]:
-    return {
-        "quiet": True,
-        "no_warnings": False,
-        "noplaylist": True,
-        "socket_timeout": 25,
-        "retries": 2,
-        "fragment_retries": 2,
-        "extractor_retries": 1,
-        "cachedir": False,
-        "restrictfilenames": True,
-        "js_runtimes": {"node": {"path": NODE_PATH}},
-    }
+async def maintenance_notice(user_id: int, where: str) -> None:
+    now = time.monotonic()
+    # Notify/log at most once per user per minute to prevent spam during repeated polling.
+    if now - last_maintenance_alert.get(user_id, 0) >= 60:
+        last_maintenance_alert[user_id] = now
+        store.add_event(user_id, "maintenance_interaction", where)
+        await notify_owner(f"🛠 تفاعل أثناء الصيانة\nالمستخدم: {user_id}\nالمكان: {where}", user_id=user_id)
 
 
-def extract_info(url: str) -> dict[str, Any]:
-    validate_public_url(url)
-    options = ytdlp_options()
-    options.update({"skip_download": True, "extract_flat": False})
-    with yt_dlp.YoutubeDL(options) as ydl:
-        info = ydl.extract_info(url, download=False)
-    if not isinstance(info, dict):
-        raise ValueError("الموقع ما رجّعش بيانات فيديو صالحة.")
-    if info.get("_type") in {"playlist", "multi_video"}:
-        entries = info.get("entries") or []
-        info = next((entry for entry in entries if entry), None)
-        if not isinstance(info, dict):
-            raise ValueError("الرابط ده مفيهوش فيديو متاح.")
-    return info
+async def apply_settings_patch(patch: dict[str, Any], actor_id: int) -> dict[str, Any]:
+    """Persist admin changes; maintenance mode also stops jobs for regular users."""
+    before = store.get_settings()
+    after = store.set_settings(patch)
+    await limiter.notify_limit_change()
+    if patch.get("maintenance_mode") is True and not before.get("maintenance_mode", False):
+        cancelled = 0
+        for job_id, job in list(active_progress.items()):
+            job_user = int(job.get("user_id") or 0)
+            if job_user and not store.is_admin(job_user) and job.get("status") in {"queued", "running"}:
+                if request_cancel(job_id, job_user):
+                    cancelled += 1
+        store.add_event(actor_id, "maintenance_enabled", f"cancel_requested={cancelled}")
+        await notify_owner(f"🛠 تم تفعيل وضع الصيانة. أُرسلت طلبات إلغاء لـ {cancelled} عملية غير إدارية.")
+    elif patch.get("maintenance_mode") is False and before.get("maintenance_mode", False):
+        store.add_event(actor_id, "maintenance_disabled", "")
+    return after
 
 
-def is_youtube(url: str) -> bool:
-    host = (urlparse(url).hostname or "").lower()
-    return host == "youtu.be" or host.endswith(("youtube.com", "youtube-nocookie.com"))
+def register_user(update: Update) -> int:
+    user = update.effective_user
+    if not user:
+        return 0
+    store.touch_user(user.id, user.username or "", user.first_name or "")
+    return user.id
 
 
-def friendly_error(url: str, exc: Exception) -> str:
-    raw = str(exc or "")
-    low = raw.lower()
-    if is_youtube(url) and any(t in low for t in (
-        "sign in to confirm you're not a bot",
-        "sign in to confirm you’re not a bot",
-        "confirm you're not a bot",
-        "confirm you’re not a bot",
-    )):
-        return (
-            "YouTube رفض الطلب من عنوان الاستضافة وطلب تحققًا إضافيًا. ده قرار من المنصة، "
-            "ومش هنتجاوز تسجيل الدخول أو فحص الحماية. جرّب رابطًا عامًا آخر أو منصة مدعومة مختلفة."
-        )
-    if any(t in low for t in ("private video", "video is private", "login required", "members-only", "sign in")):
-        return "الفيديو خاص أو يحتاج تسجيل دخول/صلاحية مش متوفرة للبوت. استخدم رابطًا عامًا لديك إذن بتنزيله."
-    if "unsupported url" in low or "no suitable extractor" in low:
-        return "الموقع أو نوع الرابط ده مش مدعوم حاليًا. جرّب رابط الفيديو نفسه بدل رابط الصفحة العامة."
-    if "max-filesize" in low or "file is larger than" in low or "larger than max" in low:
-        return f"حجم الفيديو أكبر من حد الإرسال الحالي ({MAX_UPLOAD_MB} MB). جرّب جودة أقل أو فيديو أقصر."
-    if "timed out" in low or "timeout" in low:
-        return "الموقع اتأخر في الرد. جرّب مرة تانية بعد شوية."
-    if not raw or len(raw) > 350:
-        return "الموقع رفض الطلب أو الرابط مش متاح حاليًا. جرّب رابطًا عامًا آخر."
-    return raw
+async def reject_blocked_user(update: Update, user_id: int) -> bool:
+    if user_id and store.is_blocked(user_id) and not store.is_admin(user_id):
+        message = update.effective_message
+        if message:
+            await message.reply_text("⛔ حسابك موقوف من استخدام البوت. تواصل مع مالك البوت للمراجعة.")
+        return True
+    return False
 
 
-def get_size(fmt: dict[str, Any] | None) -> int | None:
-    if not fmt:
-        return None
-    value = fmt.get("filesize") or fmt.get("filesize_approx")
+def format_settings(settings: dict[str, Any]) -> str:
+    def flag(key: str) -> str:
+        return "✅" if settings.get(key) else "❌"
+    return (
+        "🔴⚫ **AHM X · لوحة المالك**\n\n"
+        f"الصيانة: {flag('maintenance_mode')}\n"
+        f"التنزيلات: {flag('downloads_enabled')}\n"
+        f"YouTube: {flag('youtube_enabled')} · Facebook: {flag('facebook_enabled')} · Instagram: {flag('instagram_enabled')}\n"
+        f"المنصات الأخرى: {flag('generic_enabled')} · الصوت: {flag('audio_enabled')}\n\n"
+        f"التنزيلات المتزامنة: `{settings.get('max_concurrent')}`\n"
+        f"الحد اليومي/مستخدم: `{settings.get('daily_limit')}`\n"
+        f"أقصى حجم: `{settings.get('max_upload_mb')} MB`\n"
+        f"أقصى جودة: `{settings.get('max_video_height')}p`\n"
+        f"المهلة: `{settings.get('cooldown_seconds')}s`"
+    )
+
+
+def admin_keyboard(settings: dict[str, Any]) -> InlineKeyboardMarkup:
+    items = [
+        ("maintenance_mode", "🛠 الصيانة"),
+        ("downloads_enabled", "📥 التنزيلات"),
+        ("youtube_enabled", "▶️ YouTube"),
+        ("facebook_enabled", "📘 Facebook"),
+        ("instagram_enabled", "📸 Instagram"),
+        ("generic_enabled", "🌐 منصات أخرى"),
+        ("audio_enabled", "🎵 الصوت"),
+        ("owner_alerts_enabled", "🔔 تنبيهات المالك"),
+    ]
+    rows = []
+    for key, label in items:
+        rows.append([InlineKeyboardButton(f"{'✅' if settings.get(key) else '❌'} {label}", callback_data=f"admin_toggle|{key}")])
+    rows.append([InlineKeyboardButton("📊 الإحصاءات", callback_data="admin_stats"), InlineKeyboardButton("🧾 الأخطاء", callback_data="admin_errors")])
+    if PUBLIC_URL.startswith("https://"):
+        rows.append([InlineKeyboardButton("🖥 فتح لوحة Mini App", web_app=WebAppInfo(url=f"{PUBLIC_URL}/app"))])
+    return InlineKeyboardMarkup(rows)
+
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = register_user(update)
+    msg = update.effective_message
+    if not msg or not user_id:
+        return
+    if await reject_blocked_user(update, user_id):
+        return
+    if is_maintaining() and not store.is_admin(user_id):
+        await maintenance_notice(user_id, "/start")
+        await msg.reply_text("🛠 **AHM X Downloader تحت الصيانة**\nالبوت مش هيعالج روابط حاليًا. جرب تاني بعد انتهاء الصيانة.", parse_mode="Markdown")
+        return
+    if update.effective_chat and update.effective_chat.type != ChatType.PRIVATE:
+        await msg.reply_text("📩 افتح محادثة البوت الخاصة واضغط /start علشان تفتح Mini App بأمان.")
+        return
+    settings = store.get_settings()
+    usage = store.get_usage(user_id)
+    text = (
+        "أهلًا بيك في **AHM X Downloader V4** 🔴⚫\n\n"
+        "📥 ابعت رابط فيديو عام من منصة مدعومة أو افتح Mini App للتحكم في الجودة وسجل التنزيلات.\n"
+        "🎬 اختيار الجودة وحجم تقريبي · 🎵 MP3 · 📈 متابعة التقدم\n"
+        f"📦 أقصى حجم للإرسال: {settings.get('max_upload_mb')} MB\n"
+        f"📊 المتبقي اليوم: {usage['remaining_today']} من {usage['daily_limit']} تنزيلات\n\n"
+        "استخدم البوت للمحتوى الذي تملكه أو لديك إذن بتنزيله. بعض المنصات قد ترفض طلبات الاستضافة أو تحتاج وصولًا غير متاح."
+    )
+    markup = webapp_button()
+    if store.is_admin(user_id):
+        if markup:
+            rows = markup.inline_keyboard + [[InlineKeyboardButton("🛠 لوحة الإدارة", callback_data="admin_panel")]]
+            markup = InlineKeyboardMarkup(rows)
+        else:
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton("🛠 لوحة الإدارة", callback_data="admin_panel")]])
+    await msg.reply_text(text, parse_mode="Markdown", reply_markup=markup, disable_web_page_preview=True)
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = register_user(update)
+    msg = update.effective_message
+    if not msg:
+        return
+    if await reject_blocked_user(update, user_id):
+        return
+    if is_maintaining() and not store.is_admin(user_id):
+        await maintenance_notice(user_id, "/help")
+        await msg.reply_text("🛠 البوت تحت الصيانة حاليًا. حاول لاحقًا.")
+        return
+    await msg.reply_text(
+        "📥 **طريقة الاستخدام**\n1. ابعت رابط فيديو عام في الخاص.\n2. اختار الجودة أو MP3.\n3. تابع التقدم أو ألغِ العملية.\n\n"
+        "**الأوامر**\n/start — البداية\n/help — المساعدة\n/id — رقم حسابك\n/cancel — إلغاء التنزيل\n/history — آخر التنزيلات\n/panel — لوحة الإدارة (للمصرح لهم)\n"
+        "الأحجام تقديرية وبعض الروابط قد لا تعمل بسبب قيود المنصة أو تغييراتها.",
+        parse_mode="Markdown",
+        reply_markup=webapp_button() if not update.effective_chat or update.effective_chat.type == ChatType.PRIVATE else None,
+    )
+
+
+async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = register_user(update)
+    if update.effective_message:
+        if await reject_blocked_user(update, user_id):
+            return
+        if is_maintaining() and not store.is_admin(user_id):
+            await maintenance_notice(user_id, "/id")
+            await update.effective_message.reply_text("🛠 البوت تحت الصيانة حاليًا. جرّب بعد انتهائها.")
+            return
+        await update.effective_message.reply_text(f"🆔 Telegram ID: `{user_id}`", parse_mode="Markdown")
+
+
+async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = register_user(update)
+    msg = update.effective_message
+    if not msg:
+        return
+    if await reject_blocked_user(update, user_id):
+        return
+    if is_maintaining() and not store.is_admin(user_id):
+        await maintenance_notice(user_id, "/cancel")
+    cancelled = False
+    for job_id, job in list(active_progress.items()):
+        if int(job.get("user_id") or 0) == user_id and job.get("status") in {"queued", "running"}:
+            cancelled = request_cancel(job_id, user_id) or cancelled
+    await msg.reply_text("🛑 وصلت إشارة الإلغاء. هيتوقف التنزيل عند أقرب نقطة ممكنة." if cancelled else "مفيش تنزيل شغال عندك حاليًا.")
+
+
+async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = register_user(update)
+    msg = update.effective_message
+    if not msg:
+        return
+    if await reject_blocked_user(update, user_id):
+        return
+    if is_maintaining() and not store.is_admin(user_id):
+        await maintenance_notice(user_id, "/history")
+        await msg.reply_text("🛠 البوت تحت الصيانة حاليًا. جرّب تاني بعد انتهائها.")
+        return
+    rows = store.get_history(user_id, 8)
+    if not rows:
+        await msg.reply_text("لسه مفيش تنزيلات في السجل.", reply_markup=webapp_button() if not update.effective_chat or update.effective_chat.type == ChatType.PRIVATE else None)
+        return
+    lines = ["🧾 آخر التنزيلات"]
+    for row in rows:
+        mark = {"completed": "✅", "failed": "❌", "queued": "⏳", "running": "⬇️", "cancelled": "🚫"}.get(row["status"], "•")
+        # Titles come from external websites; keep them plain text to avoid Markdown parse errors.
+        lines.append(f"{mark} {str(row['title'])[:65]} — الحالة: {row['status']}")
+    await msg.reply_text("\n".join(lines), reply_markup=webapp_button() if not update.effective_chat or update.effective_chat.type == ChatType.PRIVATE else None)
+
+
+async def cmd_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = register_user(update)
+    msg = update.effective_message
+    if not msg:
+        return
+    if await reject_blocked_user(update, user_id):
+        return
+    if is_maintaining() and not store.is_admin(user_id):
+        await maintenance_notice(user_id, "/panel")
+        await msg.reply_text("🛠 البوت تحت الصيانة حاليًا. حاول لاحقًا.")
+        return
+    if not store.is_admin(user_id):
+        await msg.reply_text("⛔ لوحة الإدارة للمالك والمشرفين المعتمدين فقط.")
+        return
+    await msg.reply_text(format_settings(store.get_settings()), parse_mode="Markdown", reply_markup=admin_keyboard(store.get_settings()))
+
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = register_user(update)
+    msg = update.effective_message
+    if not msg:
+        return
+    if await reject_blocked_user(update, user_id):
+        return
+    if is_maintaining() and not store.is_admin(user_id):
+        await maintenance_notice(user_id, "/status")
+        await msg.reply_text("🛠 البوت تحت الصيانة حاليًا. حاول لاحقًا.")
+        return
+    if not store.is_admin(user_id):
+        await msg.reply_text("الأمر ده للإدارة فقط.")
+        return
+    stats = store.get_stats()
+    await msg.reply_text(
+        "📊 **إحصاءات البوت**\n"
+        f"المستخدمون: {stats['users']}\nطلبات اليوم: {stats['today_jobs']}\n"
+        f"اكتملت: {stats['completed']} · فشلت: {stats['failed']} · نشطة: {stats['active']}\n"
+        f"أخطاء محفوظة: {stats['errors']}\nعمليات متزامنة الآن: {limiter.active}",
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_maintenance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = register_user(update)
+    msg = update.effective_message
+    if not msg:
+        return
+    if await reject_blocked_user(update, user_id):
+        return
+    if is_maintaining() and not store.is_admin(user_id):
+        await maintenance_notice(user_id, "/maintenance")
+        await msg.reply_text("🛠 البوت تحت الصيانة حاليًا. حاول لاحقًا.")
+        return
+    if not store.is_admin(user_id):
+        await msg.reply_text("الأمر ده للإدارة فقط.")
+        return
+    if not context.args or context.args[0].lower() not in {"on", "off"}:
+        await msg.reply_text("استخدم: /maintenance on أو /maintenance off")
+        return
+    value = context.args[0].lower() == "on"
+    await apply_settings_patch({"maintenance_mode": value}, user_id)
+    await msg.reply_text("🛠 تم تفعيل وضع الصيانة." if value else "✅ تم إيقاف وضع الصيانة.")
+
+
+async def cmd_set(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = register_user(update)
+    msg = update.effective_message
+    if not msg:
+        return
+    if await reject_blocked_user(update, user_id):
+        return
+    if is_maintaining() and not store.is_admin(user_id):
+        await maintenance_notice(user_id, "/set")
+        await msg.reply_text("🛠 البوت تحت الصيانة حاليًا. حاول لاحقًا.")
+        return
+    if not store.is_admin(user_id):
+        await msg.reply_text("الأمر ده للإدارة فقط.")
+        return
+    if len(context.args) < 2:
+        keys = ", ".join(SETTING_SPECS)
+        await msg.reply_text(f"استخدم /set key value\nالمفاتيح: {keys}\nمثال: /set daily_limit 12")
+        return
+    key, raw_value = context.args[0], " ".join(context.args[1:])
     try:
-        return int(value) if value else None
-    except (TypeError, ValueError):
-        return None
+        patch = validate_setting_patch({key: raw_value})
+        await apply_settings_patch(patch, user_id)
+        await msg.reply_text(f"✅ تم تعديل {SETTING_SPECS[key]['label']} إلى `{patch[key]}`", parse_mode="Markdown")
+    except Exception as exc:
+        await msg.reply_text(f"❌ {exc}")
 
 
-def format_bytes(size: int | None) -> str:
-    if not size or size <= 0:
-        return "الحجم غير معروف"
-    mib = size / (1024 * 1024)
-    return f"≈ {mib:.1f} MB" if mib < 1024 else f"≈ {mib / 1024:.2f} GB"
-
-
-def duration_text(seconds: Any) -> str:
-    try:
-        total = max(0, int(seconds or 0))
-    except (TypeError, ValueError):
-        return "غير معروف"
-    hours, remainder = divmod(total, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    return f"{hours}:{minutes:02}:{seconds:02}" if hours else f"{minutes}:{seconds:02}"
-
-
-def video_height_choices(info: dict[str, Any]) -> list[int]:
-    available = set()
-    for fmt in info.get("formats") or []:
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = register_user(update)
+    msg = update.effective_message
+    if not msg:
+        return
+    if await reject_blocked_user(update, user_id):
+        return
+    if is_maintaining() and not store.is_admin(user_id):
+        await maintenance_notice(user_id, "/admin")
+        await msg.reply_text("🛠 البوت تحت الصيانة حاليًا. حاول لاحقًا.")
+        return
+    if not store.is_owner(user_id):
+        await msg.reply_text("إدارة صلاحيات المشرفين للمالك فقط.")
+        return
+    if len(context.args) != 2 or context.args[0].lower() not in {"add", "remove"} or not context.args[1].isdigit():
+        await msg.reply_text("استخدم: /admin add USER_ID أو /admin remove USER_ID\nاستخدم /id لمعرفة رقم المستخدم.")
+        return
+    target = int(context.args[1])
+    if context.args[0].lower() == "add":
+        store.add_admin(target, user_id)
+        await msg.reply_text(f"✅ تمت إضافة {target} كمشرف.")
+    else:
         try:
-            height = int(fmt.get("height") or 0)
-        except (TypeError, ValueError):
-            continue
-        if height > 0 and height <= MAX_VIDEO_HEIGHT and fmt.get("vcodec") not in (None, "none"):
-            available.add(height)
-    if not available:
-        # Some extractors only expose one progressive format at the top level.
-        try:
-            height = int(info.get("height") or 0)
-            if 0 < height <= MAX_VIDEO_HEIGHT:
-                available.add(height)
-        except (TypeError, ValueError):
-            pass
-    choices: list[int] = []
-    for ceiling in HEIGHT_STEPS:
-        if ceiling > MAX_VIDEO_HEIGHT:
-            continue
-        candidates = [height for height in available if height <= ceiling]
-        if candidates and max(candidates) not in choices:
-            choices.append(max(candidates))
-    if available:
-        highest = max(available)
-        if highest not in choices:
-            choices.append(highest)
-    return sorted(set(choices))
+            store.remove_admin(target)
+            await msg.reply_text(f"✅ تمت إزالة صلاحيات {target}.")
+        except ValueError as exc:
+            await msg.reply_text(str(exc))
 
 
-def estimate_video_size(info: dict[str, Any], height: int) -> int | None:
-    formats = info.get("formats") or []
-    candidates = []
-    for fmt in formats:
-        try:
-            fmt_height = int(fmt.get("height") or 0)
-        except (TypeError, ValueError):
-            continue
-        if fmt_height and fmt_height <= height and fmt.get("vcodec") not in (None, "none"):
-            candidates.append(fmt)
-    if not candidates:
-        return get_size(info)
-    candidates.sort(key=lambda f: (int(f.get("height") or 0), float(f.get("tbr") or 0)), reverse=True)
-    video = candidates[0]
-    size = get_size(video)
-    if video.get("acodec") not in (None, "none") and size:
-        return size
-    audio_formats = [f for f in formats if f.get("vcodec") == "none" and f.get("acodec") not in (None, "none")]
-    audio_formats.sort(key=lambda f: float(f.get("abr") or f.get("tbr") or 0), reverse=True)
-    audio = audio_formats[0] if audio_formats else None
-    audio_size = get_size(audio)
-    if size and audio_size:
-        return size + audio_size
-    try:
-        duration = float(info.get("duration") or 0)
-        video_rate = float(video.get("vbr") or video.get("tbr") or 0)
-        audio_rate = float((audio or {}).get("abr") or 0)
-        estimated = int((video_rate + audio_rate) * 1000 * duration / 8)
-        return estimated if estimated > 0 else size
-    except (TypeError, ValueError):
-        return size
+async def cmd_errors(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = register_user(update)
+    msg = update.effective_message
+    if not msg:
+        return
+    if await reject_blocked_user(update, user_id):
+        return
+    if is_maintaining() and not store.is_admin(user_id):
+        await maintenance_notice(user_id, "/errors")
+        await msg.reply_text("🛠 البوت تحت الصيانة حاليًا. حاول لاحقًا.")
+        return
+    if not store.is_admin(user_id):
+        await msg.reply_text("سجل الأخطاء للمالك والمشرفين فقط.")
+        return
+    errors = store.get_errors(5)
+    if not errors:
+        await msg.reply_text("✅ مفيش أخطاء مسجلة.")
+        return
+    lines = ["🧩 آخر الأعطال"]
+    for err in errors:
+        # Exception text may include underscores/brackets supplied by an upstream site.
+        lines.append(f"{err['error_id']} · {err['source']} · {err['error_type']}\n{err['message'][:150]}")
+    await msg.reply_text("\n\n".join(lines))
 
 
-def estimate_audio_size(info: dict[str, Any]) -> int | None:
-    duration = info.get("duration")
-    try:
-        duration_value = int(duration or 0)
-    except (TypeError, ValueError):
-        duration_value = 0
-    if duration_value > 0:
-        # MP3 at 128 kbps + metadata overhead; deliberately conservative.
-        return int((128_000 / 8) * duration_value * 1.08)
-    audio_formats = [f for f in info.get("formats") or [] if f.get("vcodec") == "none" and f.get("acodec") not in (None, "none")]
-    audio_formats.sort(key=lambda f: float(f.get("abr") or f.get("tbr") or 0), reverse=True)
-    return get_size(audio_formats[0]) if audio_formats else None
+async def analyse_for_user(url: str, user_id: int) -> tuple[str, dict[str, Any]]:
+    settings = store.get_settings()
+    if not store.is_admin(user_id):
+        now = time.monotonic()
+        cooldown = int(settings.get("cooldown_seconds", 4))
+        previous = last_analysis_at.get(user_id, 0.0)
+        if now - previous < cooldown:
+            wait_for = max(1, int(cooldown - (now - previous) + 0.99))
+            raise ValueError(f"استنى {wait_for} ثانية قبل تحليل رابط جديد.")
+        last_analysis_at[user_id] = now
+    analysis_id, info = await asyncio.to_thread(analyze_url, url, settings)
+    analyses[analysis_id]["user_id"] = user_id
+    return analysis_id, info
 
 
-def caption_for(info: dict[str, Any]) -> str:
-    title = str(info.get("title") or "فيديو بدون عنوان").strip()[:360]
-    uploader = str(info.get("uploader") or info.get("channel") or "غير معروف").strip()[:100]
-    views = info.get("view_count")
-    views_text = f"\n👁 المشاهدات: {int(views):,}" if isinstance(views, (int, float)) else ""
-    return f"🎬 {title}\n👤 الناشر: {uploader}\n⏱ المدة: {duration_text(info.get('duration'))}{views_text}\n\nاختار الجودة أو الصوت من الأزرار 👇"
+def info_caption(info: dict[str, Any]) -> str:
+    title = str(info.get("title") or "فيديو بدون عنوان")[:300]
+    uploader = str(info.get("uploader") or info.get("channel") or "غير معروف")[:100]
+    return f"🎬 {title}\n👤 {uploader}\n⏱ {info.get('duration_string') or 'المدة غير متاحة'}\n\nاختار الجودة المناسبة:"
 
 
-def build_quality_keyboard(job_id: str, info: dict[str, Any]) -> InlineKeyboardMarkup:
+def telegram_quality_keyboard(analysis_id: str, summary: dict[str, Any]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    row: list[InlineKeyboardButton] = []
-    for height in video_height_choices(info):
-        size = format_bytes(estimate_video_size(info, height))
-        if len(size) > 16:
-            size = "حجم تقريبي غير معروف"
-        row.append(InlineKeyboardButton(f"🎬 {height}p · {size}", callback_data=f"dl|{job_id}|h{height}"))
+    row = []
+    for fmt in summary.get("formats", []):
+        label = f"🎵 MP3 · {fmt['size_text']}" if fmt["choice"] == "audio" else f"🎬 {fmt['label']} · {fmt['size_text']}"
+        row.append(InlineKeyboardButton(label[:60], callback_data=f"dl|{analysis_id}|{fmt['choice']}"))
         if len(row) == 2:
             rows.append(row)
             row = []
     if row:
         rows.append(row)
-    rows.append([InlineKeyboardButton(f"🎵 صوت MP3 · {format_bytes(estimate_audio_size(info))}", callback_data=f"dl|{job_id}|audio")])
-    rows.append([InlineKeyboardButton("✖️ إلغاء", callback_data=f"cancel|{job_id}")])
+    rows.append([InlineKeyboardButton("✖️ إلغاء", callback_data=f"analysis_cancel|{analysis_id}")])
     return InlineKeyboardMarkup(rows)
 
 
-def prune_jobs() -> None:
-    now = time.time()
-    for key, job in list(jobs.items()):
-        if now - job.get("created", now) > MAX_JOB_AGE_SECONDS and not job.get("running"):
-            jobs.pop(key, None)
-    if len(jobs) > MAX_JOBS:
-        old = sorted(jobs.items(), key=lambda kv: kv[1].get("created", 0))
-        for key, job in old[: len(jobs) - MAX_JOBS]:
-            if not job.get("running"):
-                jobs.pop(key, None)
+async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = register_user(update)
+    msg = update.effective_message
+    if not msg:
+        return
+    if await reject_blocked_user(update, user_id):
+        return
+    if is_maintaining() and not store.is_admin(user_id):
+        await maintenance_notice(user_id, "unknown_command")
+        await msg.reply_text("🛠 البوت تحت الصيانة حاليًا. حاول لاحقًا.")
+        return
+    await msg.reply_text("الأمر ده مش معروف. استخدم /help لعرض الأوامر المتاحة.")
 
 
-def download_media(url: str, out_dir: str, choice: str, progress: dict[str, Any]) -> str:
-    validate_public_url(url)
-    template = str(Path(out_dir) / "AHMX_%(title).80B_%(id)s.%(ext)s")
-    options = ytdlp_options()
-    options.update({
-        "outtmpl": template,
-        "paths": {"home": out_dir, "temp": out_dir},
-        "noplaylist": True,
-        "overwrites": True,
-        "max_filesize": MAX_UPLOAD_BYTES,
-        "merge_output_format": "mp4",
-    })
-
-    def hook(data: dict[str, Any]) -> None:
-        if progress.get("cancel_requested"):
-            raise DownloadCancelled("أوقفت التحميل بناءً على طلبك.")
-        if data.get("status") == "downloading":
-            downloaded = data.get("downloaded_bytes") or 0
-            total = data.get("total_bytes") or data.get("total_bytes_estimate") or 0
-            try:
-                downloaded = int(downloaded)
-                total = int(total)
-            except (TypeError, ValueError):
-                downloaded, total = 0, 0
-            if downloaded > MAX_UPLOAD_BYTES:
-                raise DownloadTooLarge(f"الملف تجاوز حد {MAX_UPLOAD_MB} MB أثناء التحميل.")
-            progress["downloaded"] = downloaded
-            progress["total"] = total
-            progress["speed"] = str(data.get("_speed_str") or "")[:40]
-            progress["phase"] = "تنزيل الفيديو"
-        elif data.get("status") == "finished":
-            progress["phase"] = "تجهيز الملف النهائي"
-
-    options["progress_hooks"] = [hook]
-    if choice == "audio":
-        options.update({
-            "format": "bestaudio/best",
-            "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"}],
-        })
-    else:
-        height = int(choice)
-        options["format"] = (
-            f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/"
-            f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best"
-        )
-
-    with yt_dlp.YoutubeDL(options) as ydl:
-        ydl.download([url])
-
-    candidates = [p for p in Path(out_dir).rglob("*") if p.is_file() and p.suffix.lower() in MEDIA_EXTENSIONS and not p.name.endswith(".part")]
-    if not candidates:
-        raise RuntimeError("التحميل انتهى لكن ماقدرتش أحدد ملف الفيديو الناتج.")
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    output = candidates[0]
-    final_size = output.stat().st_size
-    if final_size > MAX_UPLOAD_BYTES:
-        raise DownloadTooLarge(f"الحجم النهائي {format_bytes(final_size)} أكبر من حد {MAX_UPLOAD_MB} MB.")
-    progress["phase"] = "التحميل اكتمل"
-    progress["downloaded"] = final_size
-    progress["total"] = final_size
-    return str(output)
+async def handle_other_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = register_user(update)
+    msg = update.effective_message
+    if not msg:
+        return
+    if await reject_blocked_user(update, user_id):
+        return
+    if is_maintaining() and not store.is_admin(user_id):
+        await maintenance_notice(user_id, "non_text_message")
+        await msg.reply_text("🛠 البوت تحت الصيانة حاليًا. مش هقدر أعالج الرسائل لحد ما الصيانة تنتهي.")
+        return
+    if store.get_settings().get("allow_private_chats_only", True) and update.effective_chat and update.effective_chat.type != ChatType.PRIVATE:
+        return
+    await msg.reply_text("ابعت رابط فيديو عام كنص، أو افتح Mini App من /start لاختيار الجودة ومتابعة السجل.", reply_markup=webapp_button())
 
 
-async def authorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     message = update.effective_message
-    if not user or not message:
-        return False
-    if ALLOWED_USER_IDS and user.id not in ALLOWED_USER_IDS and user.id not in ADMIN_IDS:
-        await message.reply_text("🔒 البوت متاح حاليًا للمستخدمين المصرح لهم فقط.")
-        return False
-    return True
-
-
-# ── Telegram commands and handlers ─────────────────────────────────────────
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await authorized(update, context):
+    if not user or not message or not message.text:
         return
-    message = update.effective_message
-    if not message:
+    user_id = register_user(update)
+    if await reject_blocked_user(update, user_id):
         return
-    await message.reply_text(
-        "أهلًا بيك في AHM X Downloader 🔴⚫\n\n"
-        "ابعت رابط فيديو عام من موقع مدعوم، وهعرض لك العنوان والغلاف والجودات المتاحة وحجم كل اختيار بشكل تقريبي.\n\n"
-        f"📦 حد إرسال الملف: {MAX_UPLOAD_MB} MB\n"
-        "🎬 فيديو بجودة مختلفة • 🎵 استخراج صوت MP3\n"
-        "⏳ فيه متابعة للتنزيل وإمكانية الإلغاء.\n\n"
-        "استخدم البوت فقط للمحتوى الذي تملكه أو لديك إذن بتنزيله. بعض المنصات قد ترفض طلبات الاستضافة أو تشترط وصولًا إضافيًا."
-    )
-
-
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await authorized(update, context):
+    settings = store.get_settings()
+    if settings.get("maintenance_mode") and not store.is_admin(user_id):
+        await maintenance_notice(user_id, "message")
+        await message.reply_text("🛠 البوت في وضع الصيانة حاليًا. مش هقدر أعالج الرسالة أو الرابط لحد ما الصيانة تنتهي.")
         return
-    if update.effective_message:
-        await update.effective_message.reply_text(
-            "📥 طريقة الاستخدام\n"
-            "1) أرسل رابط الفيديو نفسه في الخاص.\n"
-            "2) راجع العنوان والغلاف والمدة.\n"
-            "3) اختر الجودة أو MP3.\n"
-            "4) انتظر وصول الملف؛ تقدر تلغي أثناء التنزيل.\n\n"
-            "ملاحظات مهمة:\n"
-            f"• الحد الحالي للملف {MAX_UPLOAD_MB} MB.\n"
-            "• الأحجام المعروضة تقديرية، وقد تختلف عن الحجم النهائي.\n"
-            "• لا يدعم البوت الفيديوهات الخاصة أو تجاوز تسجيل الدخول أو اختبارات الحماية.\n"
-            "• لو رابط معيّن فشل، جرّب رابطًا عامًا آخر أو جودة أقل.\n\n"
-            "الأوامر: /start /help /cancel /id"
-        )
-
-
-async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    if user and update.effective_message:
-        await update.effective_message.reply_text(f"Telegram ID بتاعك: `{user.id}`", parse_mode="Markdown")
-
-
-async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    if not user or not update.effective_message:
+    if settings.get("allow_private_chats_only", True) and update.effective_chat and update.effective_chat.type != ChatType.PRIVATE:
         return
-    job_id = active_job_by_user.get(user.id)
-    job = jobs.get(job_id or "")
-    if job and job.get("progress") is not None:
-        job["progress"]["cancel_requested"] = True
-        await update.effective_message.reply_text("🛑 وصلتني إشارة الإلغاء. هوقف التنزيل عند أقرب نقطة آمنة.")
-    else:
-        await update.effective_message.reply_text("مفيش تحميل شغال عندك حاليًا.")
-
-
-async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    message = update.effective_message
-    if not user or not message or user.id not in ADMIN_IDS:
-        if message:
-            await message.reply_text("الأمر ده للمشرفين فقط.")
+    url_match = re.search(r"https?://[^\s<>]+", message.text, flags=re.IGNORECASE)
+    if not url_match:
+        await message.reply_text("ابعت رابط فيديو عام، أو افتح Mini App لاختيار الجودة ومتابعة السجل.", reply_markup=webapp_button())
         return
-    await message.reply_text(
-        "🔴⚫ حالة AHM X Downloader\n"
-        f"• المستخدمون النشطون: {len(active_users)}\n"
-        f"• طلبات التحليل/الاختيار المخزنة مؤقتًا: {len(jobs)}\n"
-        f"• حد الإرسال: {MAX_UPLOAD_MB} MB\n"
-        f"• التنزيلات المتزامنة: {MAX_ACTIVE_DOWNLOADS}\n"
-        f"• الصيانة: {'مفعّلة' if maintenance_mode else 'متوقفة'}"
-    )
-
-
-async def cmd_maintenance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global maintenance_mode
-    user = update.effective_user
-    message = update.effective_message
-    if not user or not message or user.id not in ADMIN_IDS:
-        if message:
-            await message.reply_text("الأمر ده للمشرفين فقط.")
+    url = url_match.group(0).rstrip(".,!؟)]}>")
+    if not user_can_download(user_id, update.effective_chat.type if update.effective_chat else None):
+        await message.reply_text("التنزيلات متوقفة مؤقتًا.")
         return
-    value = context.args[0].lower() if context.args else ""
-    if value not in {"on", "off"}:
-        await message.reply_text("استخدم: /maintenance on أو /maintenance off")
-        return
-    maintenance_mode = value == "on"
-    await message.reply_text("✅ وضع الصيانة اتفعّل." if maintenance_mode else "✅ وضع الصيانة اتوقف.")
-
-
-async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.effective_message
-    user = update.effective_user
-    if not message or not user or not message.text:
-        return
-    if not await authorized(update, context):
-        return
-    if message.chat.type != ChatType.PRIVATE:
-        await message.reply_text("📩 استخدم البوت في المحادثة الخاصة علشان الخصوصية.")
-        return
-    if maintenance_mode and user.id not in ADMIN_IDS:
-        await message.reply_text("🛠 البوت في وضع الصيانة مؤقتًا. جرّب بعد شوية.")
-        return
-    url = extract_url(message.text)
-    if not url:
-        await message.reply_text("ابعت رابط فيديو يبدأ بـ http:// أو https:// 🙂")
-        return
-    if user.id in active_users:
-        await message.reply_text("عندك عملية شغالة بالفعل. استخدم /cancel أو استنى لما تخلص. ⏳")
-        return
-    now = time.monotonic()
-    if now - last_request_at.get(user.id, 0) < REQUEST_COOLDOWN_SECONDS:
-        await message.reply_text("استنى ثواني بسيطة قبل ما تبعت رابط تاني 🙂")
-        return
-    last_request_at[user.id] = now
-    active_users.add(user.id)
-    status = await message.reply_text("🔎 بفحص الرابط وبجمع معلومات الفيديو والجودات المتاحة...")
+    status = await message.reply_text("🔎 بفحص الرابط وبجمع معلومات الفيديو...")
+    platform = detect_platform(url)
     try:
-        info = await asyncio.to_thread(extract_info, url)
-        heights = video_height_choices(info)
-        has_audio = any(f.get("acodec") not in (None, "none") for f in (info.get("formats") or [])) or bool(info.get("url"))
-        if not heights and not has_audio:
-            raise ValueError("مش لاقي مسارات فيديو أو صوت قابلة للتحميل في الرابط ده.")
-        prune_jobs()
-        job_id = uuid.uuid4().hex[:8]
-        jobs[job_id] = {
-            "created": time.time(),
-            "user_id": user.id,
-            "chat_id": message.chat_id,
-            "url": url,
-            "title": str(info.get("title") or "فيديو بدون عنوان")[:400],
-            "uploader": str(info.get("uploader") or info.get("channel") or "غير معروف")[:120],
-            "duration": info.get("duration"),
-            "thumbnail": info.get("thumbnail"),
-            "heights": heights,
-            "running": False,
-            "progress": None,
-        }
-        caption = caption_for(info)
-        keyboard = build_quality_keyboard(job_id, info)
+        analysis_id, info = await analyse_for_user(url, user_id)
+        summary = build_summary(info, store.get_settings(), analysis_id)
+        if not summary.get("formats"):
+            raise ValueError("لم يتم العثور على صيغة فيديو أو صوت قابلة للتنزيل.")
+        caption = info_caption(info)
+        markup = telegram_quality_keyboard(analysis_id, summary)
         thumbnail = info.get("thumbnail")
-        try:
-            if thumbnail and str(thumbnail).startswith(("https://", "http://")):
-                await context.bot.send_photo(
-                    chat_id=message.chat_id,
-                    photo=thumbnail,
-                    caption=caption,
-                    reply_markup=keyboard,
-                    connect_timeout=20,
-                    read_timeout=30,
-                    write_timeout=30,
-                )
-            else:
-                await context.bot.send_message(chat_id=message.chat_id, text=caption, reply_markup=keyboard)
-        except (TelegramError, BadRequest, ValueError):
-            await context.bot.send_message(chat_id=message.chat_id, text=caption, reply_markup=keyboard)
-        try:
-            await status.delete()
-        except TelegramError:
-            pass
-    except Exception as exc:
-        message_text = friendly_error(url, exc)
-        if "Sign in to confirm" in str(exc) or "not a bot" in str(exc).lower():
-            log.warning("Metadata extraction rejected by source (%s)", urlparse(url).hostname)
+        if thumbnail and str(thumbnail).startswith("https://"):
+            try:
+                await context.bot.send_photo(chat_id=message.chat_id, photo=thumbnail, caption=caption[:1024], reply_markup=markup)
+            except TelegramError:
+                await context.bot.send_message(chat_id=message.chat_id, text=caption, reply_markup=markup)
         else:
-            log.warning("Metadata extraction failed (%s): %s", type(exc).__name__, str(exc)[:350])
-        try:
-            await status.edit_text(f"❌ مقدرتش أقرأ الفيديو.\n{message_text}")
-        except TelegramError:
-            await message.reply_text(f"❌ مقدرتش أقرأ الفيديو.\n{message_text}")
-    finally:
-        active_users.discard(user.id)
-
-
-async def safe_edit(message: Any, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:
-    try:
-        await message.edit_text(text, reply_markup=reply_markup)
-    except TelegramError:
-        pass
+            await context.bot.send_message(chat_id=message.chat_id, text=caption, reply_markup=markup)
+        await status.delete()
+    except Exception as exc:
+        error_id = capture_exception(exc, source="telegram_analyze", user_id=user_id, platform=platform, url=url)
+        friendly = public_error(error_id, exc)
+        LOG.exception("Telegram analysis failed id=%s platform=%s", error_id, platform)
+        await status.edit_text(f"❌ مقدرتش أقرأ الفيديو.\n{friendly['message']}\n\nرقم التشخيص: `{error_id}`", parse_mode="Markdown")
+        await notify_owner(f"⚠️ فشل تحليل رابط\nالخطأ: {error_id}\nالمنصة: {platform}\nالسبب: {type(exc).__name__}: {str(exc)[:350]}", user_id=user_id)
 
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -582,271 +596,305 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     user = update.effective_user
     if not query or not user or not query.data:
         return
+    register_user(update)
+    if store.is_blocked(user.id) and not store.is_admin(user.id):
+        try:
+            await query.answer("حسابك موقوف من الإدارة.", show_alert=True)
+        except TelegramError:
+            pass
+        return
+    if is_maintaining() and not store.is_admin(user.id):
+        await maintenance_notice(user.id, "callback")
+        try:
+            await query.answer("البوت تحت الصيانة حاليًا.", show_alert=True)
+        except TelegramError:
+            pass
+        return
     try:
         await query.answer()
     except TelegramError:
         pass
     parts = query.data.split("|")
     action = parts[0]
+    if action == "admin_panel":
+        if not store.is_admin(user.id):
+            await query.message.reply_text("⛔ لوحة الإدارة غير متاحة لحسابك.")
+            return
+        await query.message.reply_text(format_settings(store.get_settings()), parse_mode="Markdown", reply_markup=admin_keyboard(store.get_settings()))
+        return
+    if action == "admin_toggle" and len(parts) == 2:
+        if not store.is_admin(user.id):
+            return
+        key = parts[1]
+        if key not in SETTING_SPECS or SETTING_SPECS[key]["type"] != "bool":
+            return
+        settings = store.get_settings()
+        patch = {key: not bool(settings.get(key))}
+        await apply_settings_patch(patch, user.id)
+        try:
+            await query.message.edit_text(format_settings(store.get_settings()), parse_mode="Markdown", reply_markup=admin_keyboard(store.get_settings()))
+        except TelegramError:
+            await query.message.reply_text(format_settings(store.get_settings()), parse_mode="Markdown", reply_markup=admin_keyboard(store.get_settings()))
+        return
+    if action == "admin_stats":
+        if not store.is_admin(user.id):
+            return
+        stats = store.get_stats()
+        await query.message.reply_text(f"📊 مستخدمون: {stats['users']}\nطلبات اليوم: {stats['today_jobs']}\nنجاح: {stats['completed']}\nفشل: {stats['failed']}\nنشط: {stats['active']}\nأخطاء: {stats['errors']}")
+        return
+    if action == "admin_errors":
+        if not store.is_admin(user.id):
+            return
+        errors = store.get_errors(5)
+        if not errors:
+            await query.message.reply_text("✅ لا توجد أخطاء محفوظة.")
+        else:
+            await query.message.reply_text("\n\n".join(f"{e['error_id']} · {e['source']} · {e['error_type']}\n{e['message'][:220]}" for e in errors))
+        return
     if len(parts) < 2:
         return
-    job_id = parts[1]
-    job = jobs.get(job_id)
-    if not job:
-        await safe_edit(query.message, "انتهت صلاحية الطلب. ابعت الرابط مرة تانية.")
+    analysis_id = parts[1]
+    analysis = analyses.get(analysis_id)
+    if action == "analysis_cancel":
+        if analysis and analysis.get("user_id") == user.id:
+            analyses.pop(analysis_id, None)
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text("تم إلغاء اختيار الجودة.")
         return
-    if job.get("user_id") != user.id:
-        try:
-            if query.message:
-                await query.message.reply_text("الطلب ده مش خاص بيك.")
-        except TelegramError:
-            pass
-        return
-
-    if action == "cancel":
-        if job.get("running") and job.get("progress"):
-            job["progress"]["cancel_requested"] = True
-            if query.message:
-                try:
-                    await query.message.reply_text("🛑 وصلتني إشارة إلغاء التحميل.")
-                except TelegramError:
-                    pass
-        else:
-            jobs.pop(job_id, None)
-            try:
-                await query.message.edit_reply_markup(reply_markup=None)
-                await query.message.reply_text("تم إلغاء طلب التحميل.")
-            except TelegramError:
-                pass
-        return
-
-    if action == "canceljob":
-        progress = job.get("progress")
-        if progress is not None:
-            progress["cancel_requested"] = True
-            await safe_edit(query.message, "🛑 جاري إيقاف التحميل...")
-        return
-
     if action != "dl" or len(parts) != 3:
         return
-    if job.get("running"):
-        await safe_edit(query.message, "الطلب ده بدأ بالفعل. استنى شوية.")
+    if not analysis or analysis.get("user_id") != user.id:
+        await query.message.reply_text("الطلب انتهت صلاحيته أو مش تابع لحسابك. ابعت الرابط مرة تانية.")
         return
-    if user.id in active_users:
-        await safe_edit(query.message, "عندك عملية تانية شغالة بالفعل.")
+    settings = store.get_settings()
+    if not user_can_download(user.id, update.effective_chat.type if update.effective_chat else None):
+        await query.message.reply_text("التنزيلات متوقفة مؤقتًا.")
         return
-    choice_token = parts[2]
-    if choice_token == "audio":
-        choice = "audio"
-    elif choice_token.startswith("h") and choice_token[1:].isdigit():
-        choice = choice_token[1:]
-        if int(choice) not in job.get("heights", []):
-            await safe_edit(query.message, "الجودة دي مش موجودة ضمن اختيارات الرابط. ابعت الرابط مرة تانية.")
+    choice = parts[2]
+    job_id = uuid.uuid4().hex[:14]
+    try:
+        await start_download(job_id, analysis_id, user.id, choice, settings)
+    except Exception as exc:
+        await query.message.reply_text(f"❌ {exc}")
+        return
+    progress_message = await query.message.reply_text("⏳ تم وضع التنزيل في قائمة الانتظار...")
+    while True:
+        await asyncio.sleep(1.5)
+        state = get_live_job(job_id, user.id)
+        if not state:
+            await progress_message.edit_text("❌ انتهى سجل العملية قبل اكتمالها.")
             return
-    else:
-        return
-
-    active_users.add(user.id)
-    active_job_by_user[user.id] = job_id
-    job["running"] = True
-    progress: dict[str, Any] = {"phase": "في انتظار دور التنزيل", "downloaded": 0, "total": 0, "speed": "", "cancel_requested": False}
-    job["progress"] = progress
-    status_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 إلغاء التنزيل", callback_data=f"canceljob|{job_id}")]])
-    try:
-        status = await query.message.reply_text("⏳ جاري تجهيز التنزيل...", reply_markup=status_markup)
-    except TelegramError:
-        job["running"] = False
-        job["progress"] = None
-        active_users.discard(user.id)
-        active_job_by_user.pop(user.id, None)
-        log.warning("Could not create download status message")
-        return
-    temp_dir = tempfile.mkdtemp(prefix="ahmx_dl_")
-    file_path: str | None = None
-    try:
-        async with download_semaphore:
-            if progress.get("cancel_requested"):
-                raise DownloadCancelled("أوقفت العملية بناءً على طلبك.")
-            progress["phase"] = "جاري تنزيل الملف"
-            download_task = asyncio.create_task(asyncio.to_thread(download_media, job["url"], temp_dir, choice, progress))
-            last_update = 0.0
-            while not download_task.done():
-                await asyncio.sleep(2)
-                now = time.monotonic()
-                if now - last_update >= 4:
-                    downloaded = int(progress.get("downloaded") or 0)
-                    total = int(progress.get("total") or 0)
-                    phase = progress.get("phase") or "جاري التنزيل"
-                    pct = f" ({min(100, int(downloaded * 100 / total))}%)" if total > 0 else ""
-                    speed = f"\n🚀 السرعة: {progress.get('speed')}" if progress.get("speed") else ""
-                    await safe_edit(status, f"⏳ {phase}{pct}\n📦 {format_bytes(downloaded)} / {format_bytes(total)}{speed}\n\nتقدر تلغي بزر الإلغاء.", status_markup)
-                    last_update = now
-            file_path = await download_task
-        if progress.get("cancel_requested"):
-            raise DownloadCancelled("أوقفت العملية بناءً على طلبك.")
-        final_size = Path(file_path).stat().st_size
-        if final_size > MAX_UPLOAD_BYTES:
-            raise DownloadTooLarge(f"حجم الملف {format_bytes(final_size)} أكبر من حد {MAX_UPLOAD_MB} MB.")
-        await safe_edit(status, f"📤 اكتمل التحميل ({format_bytes(final_size)}). جاري الإرسال إلى تيليجرام...", None)
-        title = str(job.get("title") or "AHM X Video")[:650]
-        caption = f"✅ {title}\n📦 {format_bytes(final_size)}\n🔴⚫ AHM X Downloader"
-        ext = Path(file_path).suffix.lower()
-        with open(file_path, "rb") as media:
-            if choice == "audio" or ext in {".mp3", ".m4a", ".aac", ".opus", ".ogg"}:
-                await context.bot.send_audio(
-                    chat_id=user.id, audio=media, filename=Path(file_path).name,
-                    caption=caption[:1024], connect_timeout=30, read_timeout=180, write_timeout=180,
-                )
-            elif ext == ".mp4":
-                await context.bot.send_video(
-                    chat_id=user.id, video=media, filename=Path(file_path).name,
-                    caption=caption[:1024], supports_streaming=True,
-                    connect_timeout=30, read_timeout=180, write_timeout=180,
-                )
-            else:
-                await context.bot.send_document(
-                    chat_id=user.id, document=media, filename=Path(file_path).name,
-                    caption=caption[:1024], connect_timeout=30, read_timeout=180, write_timeout=180,
-                )
-        await safe_edit(status, "✅ تم إرسال الملف بنجاح. النسخة المؤقتة هتتمسح من السيرفر.", None)
+        if state["status"] in {"completed", "failed", "cancelled"}:
+            break
+        pct = int(state.get("progress") or 0)
+        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
         try:
-            await query.message.edit_reply_markup(reply_markup=None)
+            await progress_message.edit_text(f"⏳ {state['phase']}\n[{bar}] {pct}%\n📦 {format_bytes(state['downloaded_bytes'])} / {format_bytes(state['total_bytes'])}")
         except TelegramError:
             pass
-        jobs.pop(job_id, None)
-    except DownloadCancelled:
-        await safe_edit(status, "🛑 تم إلغاء التنزيل وحذف الملفات المؤقتة.", None)
-    except DownloadTooLarge as exc:
-        await safe_edit(status, f"⚠️ {exc}\nجرّب جودة أقل أو فيديو أقصر.", None)
-    except Exception as exc:
-        log.warning("Download/upload failed (%s): %s", type(exc).__name__, str(exc)[:350])
-        friendly = friendly_error(job["url"], exc)
-        await safe_edit(status, f"❌ فشل التحميل أو الإرسال.\n{friendly}", None)
+    if state["status"] != "completed":
+        if state["status"] == "cancelled":
+            await progress_message.edit_text("🛑 تم إلغاء التنزيل.")
+        else:
+            await progress_message.edit_text(f"❌ فشل التنزيل.\n{state.get('error_message') or state.get('phase')}\nرقم التشخيص: {state.get('error_id') or 'غير متاح'}")
+        return
+    path = file_paths.get(job_id)
+    if not path or not Path(path).is_file():
+        await progress_message.edit_text("❌ الملف المؤقت غير متاح. افتح Mini App وحاول مرة أخرى.")
+        return
+    file_path = Path(path)
+    caption = f"✅ {state['title'][:500]}\n📦 {format_bytes(file_path.stat().st_size)}\n🔴⚫ AHM X Downloader"
+    try:
+        with file_path.open("rb") as media:
+            if file_path.suffix.lower() == ".mp4":
+                await context.bot.send_video(chat_id=user.id, video=media, filename=file_path.name, caption=caption[:1024], supports_streaming=True, read_timeout=180, write_timeout=180)
+            elif file_path.suffix.lower() in {".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav"}:
+                await context.bot.send_audio(chat_id=user.id, audio=media, filename=file_path.name, caption=caption[:1024], read_timeout=180, write_timeout=180)
+            else:
+                await context.bot.send_document(chat_id=user.id, document=media, filename=file_path.name, caption=caption[:1024], read_timeout=180, write_timeout=180)
+        await progress_message.edit_text("✅ تم إرسال الملف بنجاح. اتأكد تحفظه على جهازك.")
+    except TelegramError as exc:
+        error_id = capture_exception(exc, source="telegram_upload", user_id=user.id, platform=state.get("platform", ""))
+        await progress_message.edit_text(f"⚠️ التنزيل اكتمل لكن إرسال الملف لتيليجرام فشل. رقم التشخيص: {error_id}")
     finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        active_users.discard(user.id)
-        active_job_by_user.pop(user.id, None)
-        jobs.pop(job_id, None)
+        try:
+            file_path.unlink(missing_ok=True)
+            shutil.rmtree(file_path.parent, ignore_errors=True)
+        except OSError:
+            pass
+        file_paths.pop(job_id, None)
 
 
-# ── Render Web Service / Telegram webhook ───────────────────────────────────
+async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    exc = context.error or RuntimeError("Unknown Telegram application error")
+    user_id = 0
+    platform = ""
+    url = None
+    if isinstance(update, Update) and update.effective_user:
+        user_id = update.effective_user.id
+    error_id = capture_exception(exc, source="telegram_update", user_id=user_id, platform=platform, url=url)
+    LOG.exception("Unhandled Telegram update error id=%s", error_id, exc_info=exc)
+    await notify_owner(f"🚨 خطأ في معالجة Telegram\nرقم التشخيص: {error_id}\nالنوع: {type(exc).__name__}\n{str(exc)[:500]}", user_id=user_id)
+
+
+# ── WebApp auth and API ─────────────────────────────────────────────────────
+def get_web_user(init_data: str) -> dict[str, Any]:
+    try:
+        user = validate_init_data(init_data)
+    except WebAppAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    user_id = int(user["id"])
+    store.touch_user(user_id, str(user.get("username") or ""), str(user.get("first_name") or ""))
+    if store.is_blocked(user_id) and not store.is_admin(user_id):
+        raise HTTPException(status_code=403, detail="تم إيقاف حسابك من الإدارة. تواصل مع مالك البوت إذا كنت تعتقد أن هذا خطأ.")
+    return user
+
+
+async def auth_from_header(x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data")) -> dict[str, Any]:
+    return get_web_user(x_telegram_init_data or "")
+
+
 @asynccontextmanager
-async def lifespan(web_app: FastAPI):
+async def lifespan(app: FastAPI):
     global bot_app, WEBHOOK_SECRET
+    store.init_db()
+    interrupted = store.recover_interrupted_jobs()
+    if interrupted:
+        LOG.warning("Marked %s queued/running jobs as interrupted after process restart", interrupted)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     if not BOT_TOKEN:
-        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN (or BOT_TOKEN) environment variable")
+        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN environment variable")
+    if OWNER_ID < 1:
+        raise RuntimeError("Set OWNER_ID to your numeric Telegram user ID")
     if not PUBLIC_URL.startswith("https://"):
-        raise RuntimeError("Set RENDER_EXTERNAL_URL or WEBHOOK_URL to the public HTTPS service URL")
+        raise RuntimeError("Set RENDER_EXTERNAL_URL or WEBAPP_URL to the public HTTPS URL")
     if not WEBHOOK_SECRET:
-        import secrets
         WEBHOOK_SECRET = secrets.token_urlsafe(32)
+        LOG.warning("WEBHOOK_SECRET was not configured; generated for this process. Set a stable value in Render Environment Variables.")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", WEBHOOK_SECRET):
-        raise RuntimeError("WEBHOOK_SECRET may contain only letters, digits, underscores, and hyphens")
-
-    request = HTTPXRequest(
-        connection_pool_size=16,
-        connect_timeout=30,
-        read_timeout=180,
-        write_timeout=180,
-        pool_timeout=30,
-    )
-    bot_app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .request(request)
-        .concurrent_updates(8)
-        .build()
-    )
+        raise RuntimeError("WEBHOOK_SECRET can contain only letters, digits, underscores and hyphens")
+    request = HTTPXRequest(connection_pool_size=24, connect_timeout=25, read_timeout=180, write_timeout=180, pool_timeout=30)
+    bot_app = Application.builder().token(BOT_TOKEN).request(request).concurrent_updates(8).build()
+    set_error_notifier(notify_owner)
+    cleaner_task = asyncio.create_task(cleanup_loop(), name="ahmx-cleanup")
     bot_app.add_handler(CommandHandler("start", cmd_start))
     bot_app.add_handler(CommandHandler("help", cmd_help))
-    bot_app.add_handler(CommandHandler("cancel", cmd_cancel))
     bot_app.add_handler(CommandHandler("id", cmd_id))
+    bot_app.add_handler(CommandHandler("cancel", cmd_cancel))
+    bot_app.add_handler(CommandHandler("history", cmd_history))
+    bot_app.add_handler(CommandHandler("panel", cmd_panel))
     bot_app.add_handler(CommandHandler("status", cmd_status))
     bot_app.add_handler(CommandHandler("maintenance", cmd_maintenance))
+    bot_app.add_handler(CommandHandler("set", cmd_set))
+    bot_app.add_handler(CommandHandler("admin", cmd_admin))
+    bot_app.add_handler(CommandHandler("errors", cmd_errors))
+    bot_app.add_handler(MessageHandler(filters.COMMAND, handle_unknown_command))
     bot_app.add_handler(CallbackQueryHandler(callback_handler))
-    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
-
+    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    bot_app.add_handler(MessageHandler(filters.ALL, handle_other_message))
+    bot_app.add_error_handler(telegram_error_handler)
     await bot_app.initialize()
     await bot_app.start()
-    await bot_app.bot.set_webhook(
-        url=f"{PUBLIC_URL}/telegram",
-        secret_token=WEBHOOK_SECRET,
-        allowed_updates=["message", "callback_query"],
-        drop_pending_updates=False,
-    )
+    await bot_app.bot.set_webhook(url=f"{PUBLIC_URL}/telegram", secret_token=WEBHOOK_SECRET, allowed_updates=["message", "callback_query"], drop_pending_updates=False)
     try:
         await bot_app.bot.set_my_commands([
-            BotCommand("start", "ابدأ استخدام البوت"),
-            BotCommand("help", "طريقة الاستخدام"),
-            BotCommand("cancel", "إلغاء التحميل الحالي"),
-            BotCommand("id", "معرفة Telegram ID"),
+            BotCommand("start", "ابدأ استخدام البوت"), BotCommand("help", "شرح الاستخدام"),
+            BotCommand("history", "سجل التنزيلات"), BotCommand("cancel", "إلغاء التنزيل"),
+            BotCommand("id", "معرفة Telegram ID"), BotCommand("panel", "لوحة الإدارة"),
         ])
     except TelegramError:
-        log.warning("Could not register Telegram commands")
-    log.info("Bot webhook registered: %s/telegram", PUBLIC_URL)
+        LOG.exception("Could not register bot commands")
+    if PUBLIC_URL.startswith("https://"):
+        try:
+            await bot_app.bot.set_chat_menu_button(menu_button=None)
+        except TelegramError:
+            pass
+    LOG.info("AHM X Downloader V4 is running at %s", PUBLIC_URL)
     try:
         yield
     finally:
-        if bot_app is not None:
+        cleaner_task.cancel()
+        try:
+            await cleaner_task
+        except asyncio.CancelledError:
+            pass
+        if bot_app:
             try:
+                await bot_app.bot.delete_webhook(drop_pending_updates=False)
                 await bot_app.stop()
                 await bot_app.shutdown()
             except Exception:
-                log.exception("Error shutting down Telegram application")
+                LOG.exception("Error while shutting down Telegram bot")
         bot_app = None
 
 
-api = FastAPI(title="AHM X Downloader Bot", version="3.0.0", lifespan=lifespan)
+api = FastAPI(title="AHM X Downloader V4", version="4.0.0", lifespan=lifespan)
+web_dir = Path(__file__).parent / "web"
+api.mount("/static", StaticFiles(directory=str(web_dir)), name="static")
 
 
 @api.exception_handler(Exception)
-async def internal_error_handler(request: Request, exc: Exception):
-    log.exception("Unhandled HTTP error path=%s type=%s", request.url.path, type(exc).__name__)
-    return JSONResponse(status_code=500, content={"detail": "Internal server error. Check Render Logs."})
+async def unhandled_http_error(request: Request, exc: Exception):
+    error_id = capture_exception(exc, source=f"http:{request.method}:{request.url.path}")
+    LOG.exception("Unhandled HTTP error id=%s path=%s", error_id, request.url.path)
+    return JSONResponse(status_code=500, content={"detail": f"Internal Server Error (diagnostic: {error_id})", "error_id": error_id})
 
 
 @api.get("/")
-async def root() -> dict[str, str]:
-    return {"service": "AHM X Downloader Bot", "status": "ok", "docs": "Telegram bot only; send /start to the bot."}
+async def root():
+    return RedirectResponse(url="/app")
 
 
-def distribution_version(name: str) -> str:
-    try:
-        return package_version(name)
-    except PackageNotFoundError:
-        return "missing"
-
-
-def runtime_version(command: str) -> str:
-    import subprocess
-    try:
-        proc = subprocess.run([command, "--version"], capture_output=True, text=True, timeout=3, check=False)
-        if proc.returncode == 0:
-            return (proc.stdout or proc.stderr).strip()[:80]
-    except (OSError, subprocess.SubprocessError):
-        return "unavailable"
-    return "unavailable"
+@api.get("/app")
+async def mini_app():
+    return FileResponse(str(web_dir / "index.html"))
 
 
 @api.get("/health")
-async def health() -> dict[str, str]:
+async def health():
+    import subprocess
+    def ver(cmd: str) -> str:
+        try:
+            out = subprocess.run([cmd, "--version"], capture_output=True, text=True, timeout=3, check=False)
+            return (out.stdout or out.stderr).strip().splitlines()[0][:100] if out.returncode == 0 else "unavailable"
+        except Exception:
+            return "unavailable"
+    try:
+        from importlib.metadata import version, PackageNotFoundError
+        try: ejs = version("yt-dlp-ejs")
+        except PackageNotFoundError: ejs = "missing"
+    except Exception:
+        ejs = "unknown"
+    checks = {"database": "ok", "temp_storage": "ok"}
+    try:
+        store.get_stats()
+    except Exception:
+        checks["database"] = "error"
+    try:
+        from config import DOWNLOAD_DIR
+        DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        probe = DOWNLOAD_DIR / f".health-{uuid.uuid4().hex[:8]}"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+    except Exception:
+        checks["temp_storage"] = "error"
+    settings = store.get_settings()
+    degraded = any(value != "ok" for value in checks.values()) or ejs == "missing"
     return {
-        "status": "ok",
-        "service": "ahm-x-downloader-bot",
-        "version": "3.0.0",
-        "yt_dlp": str(getattr(getattr(yt_dlp, "version", None), "__version__", "unknown")),
-        "yt_dlp_ejs": distribution_version("yt-dlp-ejs"),
-        "node": runtime_version(NODE_PATH),
-        "ffmpeg": runtime_version("ffmpeg"),
-        "webhook_configured": "yes" if bool(PUBLIC_URL and WEBHOOK_SECRET) else "no",
+        "status": "degraded" if degraded else "ok", "service": "ahm-x-downloader-v4", "version": "4.0.0",
+        "checks": checks,
+        "yt_dlp": getattr(getattr(yt_dlp, "version", None), "__version__", "unknown"),
+        "yt_dlp_ejs": ejs, "node": ver(os.getenv("YTDLP_NODE_PATH", "/usr/local/bin/node")),
+        "ffmpeg": ver("ffmpeg"), "cobalt_fallback": "configured" if os.getenv("COBALT_API_URL") else "off",
+        "active_jobs": sum(1 for item in active_progress.values() if item.get("status") in {"queued", "running"}),
+        "max_concurrent": settings.get("max_concurrent"), "mini_app": "ok",
     }
 
 
 @api.post("/telegram")
 async def telegram_webhook(request: Request):
-    if not WEBHOOK_SECRET or not hmac.compare_digest(
-        request.headers.get("X-Telegram-Bot-Api-Secret-Token", ""), WEBHOOK_SECRET
-    ):
+    if not WEBHOOK_SECRET or not hmac.compare_digest(request.headers.get("X-Telegram-Bot-Api-Secret-Token", ""), WEBHOOK_SECRET):
         raise HTTPException(status_code=403, detail="Forbidden")
     if bot_app is None:
         raise HTTPException(status_code=503, detail="Bot is starting")
@@ -856,8 +904,247 @@ async def telegram_webhook(request: Request):
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid Telegram update") from exc
     await bot_app.update_queue.put(update)
-    return JSONResponse({"ok": True})
+    return {"ok": True}
+
+
+@api.get("/api/bootstrap")
+async def api_bootstrap(user: dict[str, Any] = Depends(auth_from_header)):
+    user_id = int(user["id"])
+    settings = store.get_settings()
+    if settings.get("maintenance_mode") and not store.is_admin(user_id):
+        await maintenance_notice(user_id, "miniapp_open")
+    usage = store.get_usage(user_id)
+    return {
+        "user": {"id": user_id, "name": str(user.get("first_name") or "User"), "username": str(user.get("username") or "")},
+        "is_admin": store.is_admin(user_id), "is_owner": store.is_owner(user_id),
+        "maintenance": bool(settings.get("maintenance_mode")), "downloads_enabled": bool(settings.get("downloads_enabled")),
+        "usage": usage,
+        "settings": {key: settings.get(key, default) for key, default in DEFAULT_SETTINGS.items() if key not in {"owner_alerts_enabled", "allow_private_chats_only"}},
+        "history": store.get_history(user_id, 10),
+    }
+
+
+@api.post("/api/analyze")
+async def api_analyze(request: Request, user: dict[str, Any] = Depends(auth_from_header)):
+    user_id = int(user["id"])
+    settings = store.get_settings()
+    if settings.get("maintenance_mode") and not store.is_admin(user_id):
+        await maintenance_notice(user_id, "miniapp_analyze")
+        raise HTTPException(status_code=503, detail="البوت في وضع الصيانة حاليًا.")
+    if not settings.get("downloads_enabled") and not store.is_admin(user_id):
+        raise HTTPException(status_code=503, detail="التنزيلات متوقفة مؤقتًا.")
+    try:
+        data = await request.json()
+        url = str(data.get("url") or "").strip()
+        if not url:
+            raise ValueError("الصق رابط فيديو أولًا.")
+        platform = detect_platform(url)
+        analysis_id, info = await analyse_for_user(url, user_id)
+        summary = build_summary(info, store.get_settings(), analysis_id)
+        if not summary.get("formats"):
+            raise ValueError("لم يتم العثور على صيغ فيديو أو صوت مناسبة.")
+        summary["platform"] = platform
+        return {"ok": True, "video": summary}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        if isinstance(exc, ValueError) and "استنى" in str(exc):
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        error_id = capture_exception(exc, source="miniapp_analyze", user_id=user_id, platform=locals().get("platform", ""), url=locals().get("url"))
+        LOG.exception("Mini App analyze failed error_id=%s", error_id)
+        err = public_error(error_id, exc)
+        raise HTTPException(status_code=422, detail={"message": err["message"], "error_id": error_id}) from exc
+
+
+@api.post("/api/download")
+async def api_download(request: Request, user: dict[str, Any] = Depends(auth_from_header)):
+    user_id = int(user["id"])
+    settings = store.get_settings()
+    if settings.get("maintenance_mode") and not store.is_admin(user_id):
+        await maintenance_notice(user_id, "miniapp_download")
+        raise HTTPException(status_code=503, detail="البوت في وضع الصيانة حاليًا.")
+    if not settings.get("downloads_enabled") and not store.is_admin(user_id):
+        raise HTTPException(status_code=503, detail="التنزيلات متوقفة مؤقتًا.")
+    try:
+        body = await request.json()
+        analysis_id = str(body.get("analysis_id") or "")
+        choice = str(body.get("choice") or "")
+        job_id = uuid.uuid4().hex[:14]
+        result = await start_download(job_id, analysis_id, user_id, choice, settings)
+        await limiter.notify_limit_change()
+        return {"ok": True, **result}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        if isinstance(exc, ValueError) and "الحد اليومي" in str(exc):
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        if isinstance(exc, PermissionError):
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@api.get("/api/jobs/{job_id}")
+async def api_job(job_id: str, user: dict[str, Any] = Depends(auth_from_header)):
+    job = get_live_job(job_id, int(user["id"]))
+    if not job:
+        raise HTTPException(status_code=404, detail="العملية غير موجودة أو لا تخص حسابك.")
+    return job
+
+
+@api.post("/api/jobs/{job_id}/cancel")
+async def api_cancel(job_id: str, user: dict[str, Any] = Depends(auth_from_header)):
+    if not request_cancel(job_id, int(user["id"])):
+        raise HTTPException(status_code=404, detail="لا توجد عملية قابلة للإلغاء بهذا الرقم.")
+    return {"ok": True}
+
+
+@api.get("/api/jobs/{job_id}/file")
+async def api_job_file(job_id: str, user: dict[str, Any] = Depends(auth_from_header)):
+    job = store.get_job(job_id)
+    path = file_paths.get(job_id)
+    if not job or int(job["user_id"]) != int(user["id"]):
+        raise HTTPException(status_code=404, detail="الملف غير موجود أو لا يخص حسابك.")
+    if job["status"] != "completed" or not path or not Path(path).is_file():
+        raise HTTPException(status_code=409, detail="الملف لم يجهز بعد أو انتهت صلاحيته.")
+    return FileResponse(path, filename=Path(path).name, media_type="application/octet-stream")
+
+
+@api.get("/api/history")
+async def api_history(
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
+    user: dict[str, Any] = Depends(auth_from_header),
+):
+    user_id = int(user["id"])
+    if is_maintaining() and not store.is_admin(user_id):
+        await maintenance_notice(user_id, "miniapp_history")
+    items = store.get_history(user_id, limit, offset)
+    return {"items": items, "usage": store.get_usage(user_id), "has_more": len(items) == limit, "next_offset": offset + len(items)}
+
+
+@api.get("/api/admin/settings")
+async def api_admin_settings(user: dict[str, Any] = Depends(auth_from_header)):
+    if not store.is_admin(int(user["id"])):
+        raise HTTPException(status_code=403, detail="لوحة الإدارة للمصرح لهم فقط.")
+    return {"settings": store.get_settings(), "specs": SETTING_SPECS, "stats": store.get_stats(), "admins": store.list_admins() if store.is_owner(int(user["id"])) else []}
+
+
+@api.patch("/api/admin/settings")
+async def api_admin_update_settings(request: Request, user: dict[str, Any] = Depends(auth_from_header)):
+    user_id = int(user["id"])
+    if not store.is_admin(user_id):
+        raise HTTPException(status_code=403, detail="تعديل الإعدادات للمصرح لهم فقط.")
+    try:
+        body = await request.json()
+        patch = validate_setting_patch(body)
+        settings = await apply_settings_patch(patch, user_id)
+        store.add_event(user_id, "settings_changed", ",".join(patch.keys()))
+        return {"ok": True, "settings": settings}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@api.get("/api/admin/errors")
+async def api_admin_errors(user: dict[str, Any] = Depends(auth_from_header)):
+    if not store.is_admin(int(user["id"])):
+        raise HTTPException(status_code=403, detail="سجل الأخطاء للمصرح لهم فقط.")
+    return {"items": store.get_errors(50)}
+
+
+@api.get("/api/admin/users")
+async def api_admin_list_users(
+    limit: int = Query(default=30, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
+    user: dict[str, Any] = Depends(auth_from_header),
+):
+    if not store.is_admin(int(user["id"])):
+        raise HTTPException(status_code=403, detail="إدارة المستخدمين للمصرح لهم فقط.")
+    items = store.list_users(limit, offset)
+    for item in items:
+        item["is_admin"] = store.is_admin(int(item["user_id"]))
+        item["is_owner"] = store.is_owner(int(item["user_id"]))
+    return {"items": items, "has_more": len(items) == limit, "next_offset": offset + len(items)}
+
+
+@api.patch("/api/admin/users/{target_id}")
+async def api_admin_update_user(target_id: int, request: Request, user: dict[str, Any] = Depends(auth_from_header)):
+    actor_id = int(user["id"])
+    if not store.is_admin(actor_id):
+        raise HTTPException(status_code=403, detail="تعديل المستخدمين للمصرح لهم فقط.")
+    if target_id <= 0:
+        raise HTTPException(status_code=422, detail="رقم المستخدم غير صالح.")
+    if store.is_owner(target_id) or (store.is_admin(target_id) and target_id != actor_id):
+        raise HTTPException(status_code=403, detail="لا يمكن تعديل مالك البوت أو حساب مشرف آخر من هنا.")
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="JSON غير صالح.") from exc
+    if not isinstance(body, dict) or not body or not set(body).issubset({"blocked", "daily_limit_override"}):
+        raise HTTPException(status_code=422, detail="الحقول المسموحة: blocked أو daily_limit_override.")
+    if target_id == actor_id and body.get("blocked") is True:
+        raise HTTPException(status_code=422, detail="لا يمكنك إيقاف حسابك الإداري بنفسك.")
+    blocked = body.get("blocked")
+    if "blocked" in body and not isinstance(blocked, bool):
+        raise HTTPException(status_code=422, detail="blocked لازم تكون true أو false.")
+    override: int | None | object = ...
+    if "daily_limit_override" in body:
+        raw = body.get("daily_limit_override")
+        if raw is None or raw == "":
+            override = None
+        else:
+            try:
+                override = int(raw)
+            except (ValueError, TypeError) as exc:
+                raise HTTPException(status_code=422, detail="الحد اليومي الفردي لازم يكون رقمًا أو null.") from exc
+            if not 1 <= override <= 100:
+                raise HTTPException(status_code=422, detail="الحد اليومي الفردي لازم يكون من 1 إلى 100.")
+    try:
+        store.update_user_access(target_id, blocked=blocked if "blocked" in body else None, daily_limit_override=override)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    store.add_event(actor_id, "user_access_changed", f"target={target_id};fields={','.join(body.keys())}")
+    if body.get("blocked") is True:
+        await notify_owner(f"⛔ تم إيقاف مستخدم من الإدارة\nالمستخدم: {target_id}\nبواسطة: {actor_id}")
+    item = next((x for x in store.list_users(100) if int(x["user_id"]) == target_id), None)
+    if item:
+        item.update({"is_admin": store.is_admin(target_id), "is_owner": store.is_owner(target_id)})
+    return {"ok": True, "user": item}
+
+
+@api.get("/api/admin/admins")
+async def api_admin_list_admins(user: dict[str, Any] = Depends(auth_from_header)):
+    if not store.is_owner(int(user["id"])):
+        raise HTTPException(status_code=403, detail="إدارة المشرفين للمالك فقط.")
+    return {"items": store.list_admins()}
+
+
+@api.post("/api/admin/admins")
+async def api_admin_add_admin(request: Request, user: dict[str, Any] = Depends(auth_from_header)):
+    user_id = int(user["id"])
+    if not store.is_owner(user_id):
+        raise HTTPException(status_code=403, detail="إضافة المشرفين للمالك فقط.")
+    body = await request.json()
+    try:
+        target = int(body.get("user_id"))
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail="أرسل Telegram user ID رقميًا.") from exc
+    if target <= 0:
+        raise HTTPException(status_code=422, detail="رقم المستخدم غير صالح.")
+    store.add_admin(target, user_id)
+    return {"ok": True, "admins": store.list_admins()}
+
+
+@api.delete("/api/admin/admins/{target_id}")
+async def api_admin_remove_admin(target_id: int, user: dict[str, Any] = Depends(auth_from_header)):
+    user_id = int(user["id"])
+    if not store.is_owner(user_id):
+        raise HTTPException(status_code=403, detail="إزالة المشرفين للمالك فقط.")
+    try:
+        store.remove_admin(target_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"ok": True, "admins": store.list_admins()}
 
 
 if __name__ == "__main__":
-    uvicorn.run("app:api", host="0.0.0.0", port=PORT, proxy_headers=True)
+    uvicorn.run("app:api", host="0.0.0.0", port=PORT, proxy_headers=True, workers=1)

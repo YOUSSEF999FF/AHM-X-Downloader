@@ -1,28 +1,34 @@
 services:
   - type: web
-    name: ahm-x-downloader-bot-v3
+    name: ahm-x-downloader-v4
     runtime: docker
-    plan: free
-    autoDeploy: true
+    plan: starter
     healthCheckPath: /health
+    autoDeploy: true
+    disk:
+      name: ahmx-v4-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
-      - key: WEBHOOK_SECRET
-        generateValue: true
+      - key: OWNER_ID
+        sync: false
       - key: ADMIN_IDS
         value: ""
-      - key: ALLOWED_USER_IDS
-        value: ""
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: DB_PATH
+        value: /var/data/ahmx_v4.sqlite3
+      - key: DATA_DIR
+        value: /var/data
+      - key: DOWNLOAD_DIR
+        value: /tmp/ahmx-v4
       - key: MAX_UPLOAD_MB
         value: "47"
-      - key: MAX_VIDEO_HEIGHT
-        value: "1080"
-      - key: MAX_ACTIVE_DOWNLOADS
-        value: "1"
-      - key: REQUEST_COOLDOWN_SECONDS
-        value: "5"
-      - key: LOG_LEVEL
-        value: INFO
       - key: YTDLP_NODE_PATH
         value: /usr/local/bin/node
+      - key: LOG_LEVEL
+        value: INFO
+      - key: COBALT_API_URL
+        value: ""

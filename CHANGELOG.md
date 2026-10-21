@@ -1,11 +1,15 @@
 # Changelog
 
-## 2.0.2 — GitHub-informed compatibility update
+## V4 — modular bot + Mini App hardening
 
-- Added `yt-dlp-ejs` as an explicit dependency for YouTube's normal JavaScript challenge solving.
-- Configured yt-dlp to use an explicit Node.js binary path; Docker/Render uses Node.js 22+.
-- Expanded `/health` with `yt-dlp`, `yt-dlp-ejs`, and Node runtime versions/path so a deployment can be diagnosed without guessing.
-- Documented the observed YouTube sign-in/bot-check limitation and linked the upstream yt-dlp EJS and comparison repositories.
-- No cookie upload, personal-session storage, or sign-in/bot-check bypass has been added.
-
-This compatibility change may resolve extraction failures caused by a missing JavaScript challenge runtime. It cannot guarantee that YouTube will permit requests from a public hosting provider.
+- Separate downloader handlers for YouTube, Facebook, Instagram, and generic supported URLs.
+- Restored crimson/black Telegram Mini App, quality selection, thumbnail/metadata preview, MP3, progress, cancellation, and download history pagination.
+- Owner/admin panel with global concurrency and daily quotas, per-user block/quota controls, maintenance mode, platform toggles, upload-size and max-height settings.
+- Owner-only admin management; bootstrap environment admins are seeded only when the admin database is empty.
+- Detailed diagnostic records with error IDs and traceback viewer; maintenance interaction notifications are rate-limited per user.
+- Dynamic concurrency updates now apply to tasks already waiting in the queue.
+- User-management listing is paginated, daily limits reset at Cairo midnight, and interrupted jobs are marked after service restart.
+- Avoid Markdown parsing of external video titles/error text in `/history` and `/errors`.
+- Fixed missing `shutil` import used during cleanup.
+- Render Blueprint uses a paid persistent disk so history/settings can survive redeploys; review costs before deploying.
+- YouTube `LOGIN_REQUIRED` / anti-bot challenges remain hosting- and platform-dependent. Optional Cobalt integration requires an owned or authorized instance; no cookies or login automation are included.
