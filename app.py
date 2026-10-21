@@ -24,7 +24,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonWebApp, Update, WebAppInfo
 from telegram.constants import ChatType
 from telegram.error import BadRequest, TelegramError
@@ -125,6 +125,9 @@ def ytdlp_options(*, quiet: bool = True) -> dict[str, Any]:
         "ignoreerrors": False,
         "restrictfilenames": True,
         "cachedir": False,
+        # yt-dlp's current YouTube extractor uses EJS for supported JavaScript challenges.
+        # Dockerfile supplies Node.js 22; this does not bypass login or anti-bot checks.
+        "js_runtimes": {"node": {}},
         "logger": None,
     }
 
@@ -144,6 +147,40 @@ def extract_info(url: str) -> dict[str, Any]:
         if not result:
             raise ValueError("الرابط ده مفيهوش فيديو متاح.")
     return result
+
+
+def friendly_extraction_error(url: str, exc: Exception) -> str:
+    """Convert frequent extractor failures into safe, actionable user messages."""
+    raw = str(exc or "")
+    lowered = raw.lower()
+    host = (urlparse(url).hostname or "").lower()
+    is_youtube = host == "youtu.be" or host.endswith(("youtube.com", "youtube-nocookie.com"))
+
+    if is_youtube and any(marker in lowered for marker in (
+        "sign in to confirm you're not a bot",
+        "sign in to confirm you’re not a bot",
+        "confirm you're not a bot",
+        "confirm you’re not a bot",
+    )):
+        return (
+            "YouTube رفض الطلب من عنوان الاستضافة وطلب تحققًا بشريًا. "
+            "البوت لا يتجاوز تسجيل الدخول أو حماية المنصة؛ جرّب رابطًا عامًا آخر "
+            "مسموحًا بتنزيله، أو استخدم خيارات YouTube الرسمية المتاحة للمحتوى."
+        )
+
+    if is_youtube and ("po token" in lowered or "proof of origin" in lowered):
+        return (
+            "YouTube لم يوفّر صيغًا قابلة للقراءة لهذا الطلب من الاستضافة الحالية. "
+            "قد تتغير متطلبات المنصة أو تتطلب تحققًا إضافيًا؛ جرّب لاحقًا أو استخدم "
+            "وسيلة التنزيل الرسمية المتاحة."
+        )
+
+    if any(marker in lowered for marker in ("private video", "video is private", "members-only", "login required", "sign in to confirm")):
+        return "الفيديو يحتاج تسجيل دخول أو صلاحية غير متوفرة للبوت. استخدم رابطًا عامًا لديك إذن بتنزيله."
+
+    if not raw or len(raw) > 500:
+        return "الموقع رفض الطلب أو رابط الفيديو غير متاح حاليًا. جرّب رابطًا عامًا آخر بعد قليل."
+    return raw
 
 
 def parse_size(fmt: dict[str, Any]) -> int | None:
@@ -452,10 +489,8 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             await message.reply_text(caption, reply_markup=keyboard)
         await status.delete()
     except Exception as exc:
-        logger.warning("Metadata extraction failed: %s", exc)
-        user_message = str(exc)
-        if len(user_message) > 650:
-            user_message = "الموقع رفض الطلب أو حصل خطأ أثناء قراءة الرابط. جرّب رابطًا عامًا آخر بعد شوية."
+        logger.warning("Metadata extraction failed (%s): %s", type(exc).__name__, str(exc)[:500])
+        user_message = friendly_extraction_error(url, exc)
         try:
             await status.edit_text(f"❌ مقدرتش أقرأ الفيديو.\n{user_message}\n\nتأكد إن الرابط عام وإن الموقع مدعوم.")
         except TelegramError:
@@ -689,18 +724,46 @@ async def lifespan(api: FastAPI):
         telegram_app = None
 
 
-api = FastAPI(title="AHM X Downloader V2", version="2.0.0", lifespan=lifespan)
+api = FastAPI(title="AHM X Downloader V2", version="2.0.1", lifespan=lifespan)
+
+
+@api.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    # Keep stack traces in Render logs, but never expose internals or secrets to users.
+    logger.exception("Unhandled server exception path=%s type=%s", request.url.path, type(exc).__name__)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "حصل خطأ داخلي في الخدمة. سجّل وقت الخطأ وراجع Render Logs للتشخيص."},
+    )
+
+
 api.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
 
 @api.get("/")
 async def root():
-    return FileResponse(WEB_DIR / "index.html")
+    index_path = WEB_DIR / "index.html"
+    if not index_path.is_file():
+        logger.error("Mini App entry file is missing: %s; WEB_DIR=%s", index_path, WEB_DIR)
+        return HTMLResponse(
+            status_code=503,
+            content=(
+                "<!doctype html><html lang='ar' dir='rtl'><meta charset='utf-8'>"
+                "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                "<title>AHM X — إعداد غير مكتمل</title>"
+                "<body style='background:#0c090b;color:#fff;font:16px sans-serif;padding:28px'>"
+                "<h2 style='color:#ff515d'>AHM X Downloader</h2>"
+                "<p>ملفات واجهة Mini App غير موجودة على الخادم.</p>"
+                "<p>تأكد أن مجلد <code>web</code> بملفاته الثلاثة (index.html وstyle.css وapp.js) موجود في مستودع GitHub، ثم أعد النشر.</p>"
+                "</body></html>"
+            ),
+        )
+    return FileResponse(index_path)
 
 
 @api.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "service": "ahm-x-downloader-v2", "yt_dlp": str(getattr(getattr(yt_dlp, "version", None), "__version__", "unknown"))}
 
 
 @api.post("/telegram")
@@ -895,10 +958,8 @@ async def mini_inspect(request: Request) -> dict[str, Any]:
     except HTTPException:
         raise
     except Exception as exc:
-        logger.info("Mini App inspect failed for user=%s: %s", user_id, type(exc).__name__)
-        text = str(exc)
-        if len(text) > 260:
-            text = "الموقع رفض الطلب أو رابط الفيديو غير متاح حاليًا."
+        logger.warning("Mini App inspect failed for user=%s (%s): %s", user_id, type(exc).__name__, str(exc)[:500])
+        text = friendly_extraction_error(url, exc)
         raise HTTPException(status_code=400, detail=text or "تعذر تحليل الرابط.") from exc
 
 
