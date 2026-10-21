@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import hashlib
+import json
 import ipaddress
 import logging
 import os
@@ -15,13 +17,15 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 import yt_dlp
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
+from fastapi.responses import FileResponse, JSONResponse
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonWebApp, Update, WebAppInfo
 from telegram.constants import ChatType
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
@@ -41,6 +45,10 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
 PUBLIC_URL = (os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").rstrip("/")
 PORT = int(os.getenv("PORT", "10000"))
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "49")) * 1024 * 1024
+MAX_DIRECT_BYTES = int(os.getenv("MAX_DIRECT_DOWNLOAD_MB", "150")) * 1024 * 1024
+ADMIN_IDS = {int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
+BOT_USERNAME = os.getenv("BOT_USERNAME", "").strip().lstrip("@")
+WEB_DIR = Path(__file__).parent / "web"
 MAX_VIDEO_HEIGHT = int(os.getenv("MAX_VIDEO_HEIGHT", "1080"))
 MAX_ACTIVE_DOWNLOADS = int(os.getenv("MAX_ACTIVE_DOWNLOADS", "2"))
 JOB_TTL_SECONDS = 20 * 60
@@ -58,6 +66,13 @@ active_users: set[int] = set()
 active_downloads = asyncio.Semaphore(max(1, MAX_ACTIVE_DOWNLOADS))
 # Short-lived cache. It is deliberately not a permanent record of URLs or media.
 jobs: dict[str, dict[str, Any]] = {}
+mini_inspections: dict[str, dict[str, Any]] = {}
+mini_jobs: dict[str, dict[str, Any]] = {}
+history_by_user: dict[int, list[dict[str, Any]]] = {}
+seen_users: set[int] = set()
+completed_downloads = 0
+maintenance_mode = False
+last_inspection_at: dict[int, float] = {}
 
 
 # ------------------------------ Utilities ------------------------------
@@ -78,6 +93,8 @@ def validate_public_url(url: str) -> None:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError("أرسل رابطًا يبدأ بـ http:// أو https://")
+    if parsed.username or parsed.password:
+        raise ValueError("الروابط التي تحتوي بيانات دخول غير مسموح بها.")
     host = parsed.hostname.rstrip(".").lower()
     if host in {"localhost", "localhost.localdomain"} or host.endswith((".localhost", ".local", ".internal")):
         raise ValueError("الرابط ده مش رابط عام صالح للتحميل.")
@@ -90,7 +107,7 @@ def validate_public_url(url: str) -> None:
         except socket.gaierror as exc:
             raise ValueError("مش قادر أوصل للدومين الموجود في الرابط. راجع الرابط وجرب تاني.") from exc
     if not addresses or any(
-        ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified
+        not ip.is_global or ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified
         for ip in addresses
     ):
         raise ValueError("الرابط لازم يكون من موقع عام على الإنترنت.")
@@ -279,19 +296,36 @@ def build_keyboard(job_id: str, info: dict[str, Any]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
-def download_media(url: str, output_dir: str, choice: str, progress_hook=None) -> str:
+def download_media(url: str, output_dir: str, choice: str, progress_hook=None, max_bytes: int | None = None) -> str:
     outtmpl = str(Path(output_dir) / "AHMX_%(title).80B_%(id)s.%(ext)s")
     options = ytdlp_options()
+    size_limit = max_bytes or MAX_UPLOAD_BYTES
     options.update({
         "outtmpl": outtmpl,
         "paths": {"home": output_dir, "temp": output_dir},
         "noplaylist": True,
         "merge_output_format": "mp4",
-        "max_filesize": MAX_UPLOAD_BYTES,
+        "max_filesize": size_limit,
         "overwrites": True,
     })
-    if progress_hook:
-        options["progress_hooks"] = [progress_hook]
+
+    def enforce_size_limit(data: dict[str, Any]) -> None:
+        # Stop a download as soon as yt-dlp reports that the byte limit was crossed.
+        # The final post-processed file is checked again below because containers and
+        # audio conversion can change the final size.
+        if data.get("status") == "downloading":
+            downloaded = data.get("downloaded_bytes")
+            try:
+                if downloaded is not None and int(downloaded) > size_limit:
+                    raise DownloadTooLarge(
+                        f"حجم الملف تجاوز الحد المسموح به وهو {format_bytes(size_limit)}."
+                    )
+            except (TypeError, ValueError):
+                pass
+        if progress_hook:
+            progress_hook(data)
+
+    options["progress_hooks"] = [enforce_size_limit]
     if choice == "audio":
         options["format"] = "bestaudio/best"
         options["postprocessors"] = [{
@@ -318,8 +352,8 @@ def download_media(url: str, output_dir: str, choice: str, progress_hook=None) -
     candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     path = candidates[0]
     size = path.stat().st_size
-    if size > MAX_UPLOAD_BYTES:
-        raise DownloadTooLarge(f"حجم الملف {format_bytes(size)} أكبر من الحد المسموح به للبوت.")
+    if size > size_limit:
+        raise DownloadTooLarge(f"حجم الملف {format_bytes(size)} أكبر من الحد المسموح به للعملية.")
     return str(path)
 
 
@@ -327,16 +361,18 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message:
         return
-    await message.reply_text(
-        "أهلًا بيك في AHM X Video Downloader 🔴⚫\n\n"
-        "📥 ابعت رابط فيديو عام من موقع مدعوم، وهعرض لك العنوان والصورة المصغّرة والمدة والأحجام التقريبية، وبعدها تختار الجودة.\n\n"
-        "• فيديو: حتى 1080p حسب الجودات المتاحة.\n"
-        "• صوت: MP3.\n"
-        f"• الحد الأقصى للملف المرسل: {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.\n\n"
-        "استخدمه للمحتوى اللي تملكه أو عندك إذن بتنزيله، والبوت لا يتجاوز الحماية أو تسجيل الدخول.\n"
+    text = (
+        "أهلًا بيك في AHM X Downloader 🔴⚫\n\n"
+        "افتح الـ Mini App علشان تستخدم واجهة التحميل الكاملة: معاينة الفيديو، الجودات والأحجام التقديرية، MP3، وسجل التحميلات.\n\n"
+        f"• إرسال داخل تيليجرام: حتى {MAX_UPLOAD_BYTES // (1024 * 1024)} MB تقريبًا.\n"
+        f"• تنزيل مباشر مؤقت: حتى {MAX_DIRECT_BYTES // (1024 * 1024)} MB حسب الاستضافة.\n\n"
+        "نزّل فقط المحتوى المسموح لك بتنزيله. لا يتجاوز البوت حماية المحتوى أو تسجيل الدخول.\n"
         "أرسل /help للمساعدة."
     )
-
+    markup = None
+    if PUBLIC_URL.startswith("https://"):
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("🚀 افتح AHM X Downloader", web_app=WebAppInfo(url=PUBLIC_URL + "/"))]])
+    await message.reply_text(text, reply_markup=markup)
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_message:
@@ -617,6 +653,7 @@ async def lifespan(api: FastAPI):
         .build()
     )
     telegram_app.add_handler(CommandHandler("start", cmd_start))
+    telegram_app.add_handler(CommandHandler("app", cmd_start))
     telegram_app.add_handler(CommandHandler("help", cmd_help))
     telegram_app.add_handler(CallbackQueryHandler(callback_handler))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
@@ -628,6 +665,18 @@ async def lifespan(api: FastAPI):
         allowed_updates=["message", "callback_query"],
         drop_pending_updates=False,
     )
+    try:
+        await telegram_app.bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="AHM X", web_app=WebAppInfo(url=PUBLIC_URL + "/")))
+    except TelegramError:
+        logger.info("Could not set Telegram menu button; inline Mini App button remains available.")
+    try:
+        await telegram_app.bot.set_my_commands([
+            BotCommand("start", "فتح AHM X Downloader"),
+            BotCommand("app", "فتح واجهة التحميل"),
+            BotCommand("help", "طريقة الاستخدام"),
+        ])
+    except Exception:
+        logger.info("Could not set bot commands.")
     logger.info("Telegram webhook registered on %s/telegram", PUBLIC_URL)
     try:
         yield
@@ -640,12 +689,13 @@ async def lifespan(api: FastAPI):
         telegram_app = None
 
 
-api = FastAPI(title="AHM X Video Downloader Bot", version="1.0.0", lifespan=lifespan)
+api = FastAPI(title="AHM X Downloader V2", version="2.0.0", lifespan=lifespan)
+api.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
 
 @api.get("/")
-async def root() -> dict[str, str]:
-    return {"service": "AHM X Video Downloader Bot", "status": "running"}
+async def root():
+    return FileResponse(WEB_DIR / "index.html")
 
 
 @api.get("/health")
@@ -667,6 +717,412 @@ async def telegram_webhook(request: Request):
     await telegram_app.update_queue.put(update)
     return JSONResponse({"ok": True})
 
+
+
+# --------------------------- Mini App API ---------------------------
+
+def validate_init_data(init_data: str) -> dict[str, Any]:
+    """Validate Telegram Mini App initData using the official Bot-token HMAC scheme."""
+    if not BOT_TOKEN or not init_data or len(init_data) > 12_000:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        pairs = parse_qsl(init_data, keep_blank_values=True, strict_parsing=True)
+        # Duplicate keys make signature interpretation ambiguous; reject them outright.
+        if len({key for key, _ in pairs}) != len(pairs):
+            raise ValueError("Duplicate initData keys")
+        values = dict(pairs)
+        received_hash = values.pop("hash", "")
+        if not received_hash or len(received_hash) != 64:
+            raise ValueError("Missing hash")
+        check_string = "\n".join(f"{key}={value}" for key, value in sorted(values.items()))
+        secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode("utf-8"), hashlib.sha256).digest()
+        calculated = hmac.new(secret_key, check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(calculated, received_hash):
+            raise ValueError("Bad signature")
+        auth_date = int(values.get("auth_date", "0"))
+        now = int(time.time())
+        if auth_date <= 0 or auth_date > now + 60 or now - auth_date > 24 * 60 * 60:
+            raise ValueError("Expired initData")
+        user_json = values.get("user")
+        if not user_json:
+            raise ValueError("Missing user")
+        user = json.loads(user_json)
+        if not isinstance(user, dict) or not user.get("id"):
+            raise ValueError("Bad user")
+        return user
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.info("Rejected invalid Telegram initData: %s", type(exc).__name__)
+        raise HTTPException(status_code=401, detail="Unauthorized") from exc
+
+
+def payload_user(payload: dict[str, Any]) -> dict[str, Any]:
+    raw = payload.get("initData")
+    if not isinstance(raw, str):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return validate_init_data(raw)
+
+
+def prune_mini_cache() -> None:
+    now = time.time()
+    expired_inspections = [key for key, item in mini_inspections.items() if now - item.get("created", now) > JOB_TTL_SECONDS]
+    for key in expired_inspections:
+        mini_inspections.pop(key, None)
+    for key, item in list(mini_jobs.items()):
+        if item.get("status") in {"queued", "downloading", "sending"}:
+            continue
+        expired = now > item.get("expires_at", item.get("created", now) + JOB_TTL_SECONDS)
+        if expired:
+            temp_dir = item.pop("temp_dir", None)
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            item.pop("file_path", None)
+            item.pop("download_token", None)
+            item.pop("download_url", None)
+            if item.get("status") == "completed" and item.get("delivery") == "browser":
+                item["message"] = "انتهت صلاحية رابط التنزيل المؤقت."
+        if now - item.get("created", now) > JOB_TTL_SECONDS * 3:
+            mini_jobs.pop(key, None)
+
+
+def choice_rows(info: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    heights = output_heights(info)
+    for height in heights:
+        size = approx_size_for_height(info, height)
+        rows.append({
+            "id": f"h{height}",
+            "height": height,
+            "label": f"{height}p",
+            "size_bytes": size,
+            "size_label": format_bytes(size),
+            "recommended": height == max(heights) if heights else False,
+        })
+    formats = info.get("formats") or []
+    if any(f.get("acodec") not in (None, "none") for f in formats):
+        audio_size = approx_audio_size(info)
+        rows.append({
+            "id": "audio",
+            "height": 0,
+            "label": "MP3",
+            "size_bytes": audio_size,
+            "size_label": format_bytes(audio_size),
+            "recommended": False,
+        })
+    return rows
+
+
+def add_history(user_id: int, item: dict[str, Any]) -> None:
+    entries = history_by_user.setdefault(user_id, [])
+    entries.insert(0, item)
+    del entries[40:]
+
+
+def update_history(user_id: int, job_id: str, **changes: Any) -> None:
+    for item in history_by_user.get(user_id, []):
+        if item.get("job_id") == job_id:
+            item.update(changes)
+            break
+
+
+async def mini_api_error(request: Request) -> dict[str, Any]:
+    # Kept for explicit API consumers; normal handlers perform authentication individually.
+    return {}
+
+
+@api.get("/api/public-config")
+async def public_config() -> dict[str, Any]:
+    return {
+        "app_name": "AHM X Downloader",
+        "bot_username": BOT_USERNAME,
+        "telegram_upload_mb": MAX_UPLOAD_BYTES // (1024 * 1024),
+        "direct_download_mb": MAX_DIRECT_BYTES // (1024 * 1024),
+    }
+
+
+@api.post("/api/session")
+async def mini_session(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    user = payload_user(payload)
+    user_id = int(user["id"])
+    seen_users.add(user_id)
+    return {
+        "user": {"id": user_id, "first_name": str(user.get("first_name") or "Creator"), "username": user.get("username")},
+        "is_admin": user_id in ADMIN_IDS,
+        "maintenance": maintenance_mode,
+        "limits": {"telegram_mb": MAX_UPLOAD_BYTES // (1024 * 1024), "direct_mb": MAX_DIRECT_BYTES // (1024 * 1024)},
+    }
+
+
+@api.post("/api/inspect")
+async def mini_inspect(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    user = payload_user(payload)
+    user_id = int(user["id"])
+    seen_users.add(user_id)
+    if maintenance_mode and user_id not in ADMIN_IDS:
+        raise HTTPException(status_code=503, detail="maintenance")
+    now = time.time()
+    if now - last_inspection_at.get(user_id, 0) < 1.5:
+        raise HTTPException(status_code=429, detail="Please wait a moment before analyzing another link.")
+    last_inspection_at[user_id] = now
+    url = payload.get("url")
+    if not isinstance(url, str) or len(url.strip()) > 2500:
+        raise HTTPException(status_code=400, detail="أرسل رابط فيديو صالحًا.")
+    url = url.strip()
+    try:
+        validate_public_url(url)
+        info = await asyncio.to_thread(extract_info, url)
+        choices = choice_rows(info)
+        if not choices:
+            raise ValueError("لم يتم العثور على صيغ فيديو أو صوت قابلة للتنزيل لهذا الرابط.")
+        prune_mini_cache()
+        inspect_id = uuid.uuid4().hex[:16]
+        mini_inspections[inspect_id] = {"created": time.time(), "user_id": user_id, "url": url, "info": info, "choices": choices}
+        duration = info.get("duration")
+        return {
+            "inspect_id": inspect_id,
+            "title": str(info.get("title") or "فيديو بدون عنوان")[:350],
+            "uploader": str(info.get("uploader") or info.get("channel") or "غير معروف")[:150],
+            "duration": duration,
+            "view_count": info.get("view_count"),
+            "thumbnail": info.get("thumbnail") if str(info.get("thumbnail") or "").startswith(("https://", "http://")) else None,
+            "webpage_url": info.get("webpage_url") or url,
+            "platform": str(info.get("extractor_key") or info.get("extractor") or "VIDEO")[:60],
+            "choices": choices,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.info("Mini App inspect failed for user=%s: %s", user_id, type(exc).__name__)
+        text = str(exc)
+        if len(text) > 260:
+            text = "الموقع رفض الطلب أو رابط الفيديو غير متاح حاليًا."
+        raise HTTPException(status_code=400, detail=text or "تعذر تحليل الرابط.") from exc
+
+
+async def perform_mini_download(job_id: str) -> None:
+    global completed_downloads
+    job = mini_jobs.get(job_id)
+    if not job:
+        return
+    user_id = int(job["user_id"])
+    temp_dir = tempfile.mkdtemp(prefix="ahmx_mini_")
+    job["temp_dir"] = temp_dir
+    loop = asyncio.get_running_loop()
+    last_progress = {"value": -1}
+
+    def progress_hook(data: dict[str, Any]) -> None:
+        if data.get("status") != "downloading":
+            return
+        total = data.get("total_bytes") or data.get("total_bytes_estimate")
+        got = data.get("downloaded_bytes")
+        if not total or got is None:
+            return
+        pct = max(0, min(100, int(int(got) * 100 / int(total))))
+        if pct >= last_progress["value"] + 2 or pct == 100:
+            last_progress["value"] = pct
+            def set_progress() -> None:
+                current = mini_jobs.get(job_id)
+                if current:
+                    current["progress"] = pct
+                    current["message"] = f"جاري تنزيل الملف… {pct}%"
+            try:
+                loop.call_soon_threadsafe(set_progress)
+            except RuntimeError:
+                pass
+
+    try:
+        job["status"] = "downloading"
+        job["message"] = "جاري تنزيل الملف…"
+        max_bytes = MAX_UPLOAD_BYTES if job["delivery"] == "telegram" else MAX_DIRECT_BYTES
+        async with active_downloads:
+            file_path = await asyncio.to_thread(download_media, job["url"], temp_dir, job["choice"], progress_hook, max_bytes)
+        size = os.path.getsize(file_path)
+        job["progress"] = 100
+        job["file_size"] = size
+        job["filename"] = Path(file_path).name
+        if job["delivery"] == "telegram":
+            if size > MAX_UPLOAD_BYTES:
+                raise DownloadTooLarge(f"حجم الملف {format_bytes(size)} أكبر من حد الإرسال إلى تيليجرام.")
+            if telegram_app is None:
+                raise RuntimeError("البوت غير متصل حاليًا؛ جرّب مرة أخرى لاحقًا.")
+            job["status"] = "sending"
+            job["message"] = "الملف جاهز، جاري إرساله إلى تيليجرام…"
+            caption = f"✅ {str(job.get('title') or 'AHM X Video')[:650]}\\n📦 الحجم: {format_bytes(size)}\\n🔴⚫ AHM X Downloader"
+            suffix = Path(file_path).suffix.lower()
+            with open(file_path, "rb") as media_file:
+                if job["choice"] == "audio" or suffix in {".mp3", ".m4a", ".aac", ".opus"}:
+                    await telegram_app.bot.send_audio(chat_id=user_id, audio=media_file, filename=Path(file_path).name, caption=caption[:1024], read_timeout=180, write_timeout=180, connect_timeout=30)
+                elif suffix == ".mp4":
+                    await telegram_app.bot.send_video(chat_id=user_id, video=media_file, filename=Path(file_path).name, caption=caption[:1024], supports_streaming=True, read_timeout=180, write_timeout=180, connect_timeout=30)
+                else:
+                    await telegram_app.bot.send_document(chat_id=user_id, document=media_file, filename=Path(file_path).name, caption=caption[:1024], read_timeout=180, write_timeout=180, connect_timeout=30)
+            job["status"] = "completed"
+            job["message"] = "تم إرسال الملف بنجاح إلى تيليجرام."
+            job["download_url"] = None
+            job["expires_at"] = time.time() + JOB_TTL_SECONDS
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            job.pop("temp_dir", None)
+        else:
+            token = secrets.token_urlsafe(28)
+            job["download_token"] = token
+            job["file_path"] = file_path
+            job["download_url"] = f"{PUBLIC_URL}/api/file/{job_id}?token={token}"
+            job["status"] = "completed"
+            job["message"] = "الملف جاهز للتنزيل على جهازك."
+            job["expires_at"] = time.time() + JOB_TTL_SECONDS
+            # File remains temporary only for the short-lived signed download URL.
+        completed_downloads += 1
+        update_history(user_id, job_id, status="completed", size_bytes=size, quality_label=job.get("quality_label"))
+    except Exception as exc:
+        logger.info("Mini download failed job=%s type=%s", job_id, type(exc).__name__)
+        message = str(exc)
+        if "max-filesize" in message.lower() or "larger than" in message.lower() or isinstance(exc, DownloadTooLarge):
+            message = "حجم الملف أكبر من الحد المسموح به. جرّب دقة أقل أو اختر طريقة تنزيل مناسبة."
+        elif len(message) > 260:
+            message = "الموقع رفض التحميل أو الجودة غير متاحة حاليًا. جرّب اختيارًا آخر."
+        job["status"] = "failed"
+        job["error"] = message
+        job["message"] = "فشل التحميل."
+        job["expires_at"] = time.time() + JOB_TTL_SECONDS
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        job.pop("temp_dir", None)
+        update_history(user_id, job_id, status="failed", error=message)
+    finally:
+        active_users.discard(user_id)
+
+
+@api.post("/api/download")
+async def mini_download(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    user = payload_user(payload)
+    user_id = int(user["id"])
+    seen_users.add(user_id)
+    if maintenance_mode and user_id not in ADMIN_IDS:
+        raise HTTPException(status_code=503, detail="maintenance")
+    inspect_id = payload.get("inspect_id")
+    inspected = mini_inspections.get(str(inspect_id))
+    if not inspected or inspected.get("user_id") != user_id or time.time() - inspected.get("created", 0) > JOB_TTL_SECONDS:
+        raise HTTPException(status_code=400, detail="انتهت صلاحية المعاينة. حلّل الرابط مرة أخرى.")
+    quality = str(payload.get("quality") or "")
+    choice_row = next((row for row in inspected["choices"] if row["id"] == quality), None)
+    if not choice_row:
+        raise HTTPException(status_code=400, detail="اختيار الجودة غير صالح.")
+    delivery = payload.get("delivery")
+    if delivery not in {"telegram", "browser"}:
+        raise HTTPException(status_code=400, detail="طريقة الاستلام غير صالحة.")
+    if delivery == "telegram" and choice_row.get("size_bytes") and choice_row["size_bytes"] > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="الحجم المتوقع أكبر من حد تيليجرام؛ اختر التنزيل على الجهاز أو جودة أقل.")
+    if user_id in active_users:
+        raise HTTPException(status_code=409, detail="عندك عملية تحميل شغّالة بالفعل.")
+    choice = "audio" if quality == "audio" else str(int(quality[1:])) if re.fullmatch(r"h\d{2,4}", quality) else ""
+    if not choice:
+        raise HTTPException(status_code=400, detail="اختيار الجودة غير صالح.")
+    job_id = uuid.uuid4().hex[:14]
+    label = choice_row.get("label") or quality
+    job = {
+        "job_id": job_id,
+        "created": time.time(),
+        "user_id": user_id,
+        "inspect_id": str(inspect_id),
+        "url": inspected["url"],
+        "title": str(inspected["info"].get("title") or "AHM X Video")[:350],
+        "thumbnail": inspected["info"].get("thumbnail"),
+        "choice": choice,
+        "quality": quality,
+        "quality_label": "MP3" if quality == "audio" else label,
+        "delivery": delivery,
+        "status": "queued",
+        "progress": 0,
+        "message": "تم وضع طلبك في قائمة التنفيذ…",
+    }
+    mini_jobs[job_id] = job
+    active_users.add(user_id)
+    add_history(user_id, {"job_id": job_id, "created": job["created"], "title": job["title"], "quality": quality, "quality_label": job["quality_label"], "delivery": delivery, "status": "queued"})
+    asyncio.create_task(perform_mini_download(job_id))
+    return {"job_id": job_id, "status": "queued"}
+
+
+@api.post("/api/job")
+async def mini_job_status(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    user = payload_user(payload)
+    job_id = str(payload.get("job_id") or "")
+    job = mini_jobs.get(job_id)
+    if not job or job.get("user_id") != int(user["id"]):
+        raise HTTPException(status_code=404, detail="العملية غير موجودة أو انتهت صلاحيتها.")
+    return {"job_id": job_id, "status": job.get("status"), "progress": job.get("progress", 0), "message": job.get("message", ""), "error": job.get("error"), "delivery": job.get("delivery"), "download_url": job.get("download_url"), "file_size": job.get("file_size")}
+
+
+def cleanup_browser_download(job_id: str) -> None:
+    job = mini_jobs.get(job_id)
+    if not job:
+        return
+    temp_dir = job.pop("temp_dir", None)
+    if temp_dir:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+    job.pop("file_path", None)
+    job.pop("download_token", None)
+    job.pop("download_url", None)
+    job["expires_at"] = time.time()
+
+
+@api.get("/api/file/{job_id}")
+async def mini_file(job_id: str, token: str):
+    job = mini_jobs.get(job_id)
+    if not job or job.get("status") != "completed" or job.get("delivery") != "browser":
+        raise HTTPException(status_code=404, detail="رابط التنزيل غير متاح.")
+    expected = str(job.get("download_token") or "")
+    if not expected or not hmac.compare_digest(expected, token):
+        raise HTTPException(status_code=403, detail="رابط التنزيل غير صالح.")
+    if time.time() > job.get("expires_at", 0):
+        cleanup_browser_download(job_id)
+        raise HTTPException(status_code=410, detail="انتهت صلاحية رابط التنزيل.")
+    path = job.get("file_path")
+    if not path or not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="الملف المؤقت لم يعد موجودًا.")
+    filename = str(job.get("filename") or Path(path).name)
+    suffix = Path(filename).suffix.lower()
+    media_type = "audio/mpeg" if suffix == ".mp3" else "video/mp4" if suffix == ".mp4" else "application/octet-stream"
+    return FileResponse(path, media_type=media_type, filename=filename, background=BackgroundTask(cleanup_browser_download, job_id))
+
+
+@api.post("/api/history")
+async def mini_history(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    user = payload_user(payload)
+    items = history_by_user.get(int(user["id"]), [])[:30]
+    return {"items": [{k: v for k, v in item.items() if k not in {"url", "inspect_id", "user_id"}} for item in items]}
+
+
+@api.post("/api/admin/overview")
+async def mini_admin_overview(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    user = payload_user(payload)
+    if int(user["id"]) not in ADMIN_IDS:
+        raise HTTPException(status_code=403, detail="غير مسموح لك بفتح لوحة المشرف.")
+    running = sum(1 for item in mini_jobs.values() if item.get("status") in {"queued", "downloading", "sending"})
+    recent = sorted(mini_jobs.values(), key=lambda item: item.get("created", 0), reverse=True)[:12]
+    return {
+        "users": len(seen_users),
+        "completed": completed_downloads,
+        "running": running,
+        "maintenance": maintenance_mode,
+        "recent": [{"title": item.get("title"), "quality": item.get("quality"), "quality_label": item.get("quality_label"), "status": item.get("status"), "created": item.get("created")} for item in recent],
+    }
+
+
+@api.post("/api/admin/maintenance")
+async def mini_admin_maintenance(request: Request) -> dict[str, Any]:
+    global maintenance_mode
+    payload = await request.json()
+    user = payload_user(payload)
+    if int(user["id"]) not in ADMIN_IDS:
+        raise HTTPException(status_code=403, detail="غير مسموح لك بتغيير إعدادات الإدارة.")
+    maintenance_mode = bool(payload.get("enabled"))
+    return {"maintenance": maintenance_mode}
 
 if __name__ == "__main__":
     uvicorn.run(api, host="0.0.0.0", port=PORT, log_level=os.getenv("LOG_LEVEL", "info").lower())

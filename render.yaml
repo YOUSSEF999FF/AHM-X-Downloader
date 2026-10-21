@@ -1,10 +1,26 @@
 services:
   - type: web
-    name: ahm-x-video-downloader
+    name: ahm-x-downloader-v2
     runtime: docker
     plan: free
-    autoDeploy: true
     healthCheckPath: /health
+    autoDeploy: true
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: ADMIN_IDS
+        value: ""
+      - key: BOT_USERNAME
+        value: ""
+      - key: MAX_UPLOAD_MB
+        value: "49"
+      - key: MAX_DIRECT_DOWNLOAD_MB
+        value: "150"
+      - key: MAX_VIDEO_HEIGHT
+        value: "1080"
+      - key: MAX_ACTIVE_DOWNLOADS
+        value: "1"
+      - key: LOG_LEVEL
+        value: INFO

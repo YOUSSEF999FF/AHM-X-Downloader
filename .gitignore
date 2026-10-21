@@ -1,8 +1,9 @@
-__pycache__/
-*.py[cod]
 .env
 .venv/
-venv/
+__pycache__/
+*.py[cod]
 *.log
-tmp/
-downloads/
+.DS_Store
+.idea/
+.vscode/
+.tmp/
