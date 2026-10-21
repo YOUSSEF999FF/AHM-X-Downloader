@@ -1,46 +1,255 @@
 (() => {
-  const $ = (id) => document.getElementById(id);
+  'use strict';
   const tg = window.Telegram?.WebApp;
-  const state = { initData: tg?.initData || '', user: null, isAdmin: false, inspectId: null, selectedQuality: null, title: '', thumbnail: '', activeJob: null, pollTimer: null, lang: localStorage.getItem('ahmx-lang') || ((tg?.initDataUnsafe?.user?.language_code || 'ar').startsWith('ar') ? 'ar' : 'en'), botUsername: '', maintenance: false };
-  const t = {
-    ar: {
-      secure:'آمن وجاهز',heroLabel:'كل فيديو. رابط واحد.',heroTitleA:'نزّل محتواك',heroTitleB:'بجودتك المفضّلة.',heroDescription:'واجهة واحدة لمعاينة الفيديو، اختيار الجودة، أو استخراج الصوت — بسرعة ومن غير تعقيد.',moreSites:'مواقع أخرى',pasteTitle:'حط رابط الفيديو هنا',pasteSub:'الرابط العام هو كل اللي محتاجه',urlPlaceholder:'https://...',inspectButton:'تحليل الفيديو',privacyLine:'استخدم الروابط العامة والمحتوى المسموح لك بتنزيله فقط.',detected:'VIDEO DETECTED',previewHeading:'معاينة الفيديو',openSource:'فتح المصدر',qualityTitle:'اختار الجودة',qualitySub:'الحجم تقديري وقد يختلف بعد التحميل',deliveryTitle:'هتستلم الملف إزاي؟',deliverySub:'اختار طريقة التسليم المناسبة',telegramDeliveryTitle:'إرسال داخل تيليجرام',telegramDeliverySub:'أسهل في الحفظ والمشاركة • حتى 49 MB',browserDeliveryTitle:'تحميل على الجهاز',browserDeliverySub:'رابط مؤقت • حتى 150 MB حسب الاستضافة',downloadButton:'ابدأ التحميل',preparing:'جاري تجهيز طلبك…',progressHint:'سيتم حذف النسخة المؤقتة تلقائيًا بعد انتهاء العملية.',directDownload:'تنزيل الملف على الجهاز ↗',featureQuality:'اختيارات واضحة',featureQualitySub:'الجودات المتاحة وحجمها',featurePrivacy:'خصوصيتك أولًا',featurePrivacySub:'ملفات مؤقتة فقط',featureEasy:'واجهة بسيطة',featureEasySub:'مصممة للموبايل',personalSpace:'YOUR SPACE',historyTitle:'سجل التحميلات',refresh:'تحديث',historyNote:'السجل داخل الذاكرة الحالية وقد يُمسح عند إعادة تشغيل الاستضافة.',preferences:'PREFERENCES',settingsTitle:'الإعدادات',languageSetting:'لغة الواجهة',languageSub:'اختر اللغة المناسبة ليك',contentRule:'الاستخدام المسؤول',contentRuleSub:'نزّل فقط الفيديوهات التي تملكها أو لديك إذن بتنزيلها.',tempFiles:'الملفات المؤقتة',tempFilesSub:'يتم تنظيف الملفات بعد التسليم أو انتهاء الرابط.',adminTitle:'لوحة المشرف',maintenanceTitle:'وضع الصيانة',maintenanceSub:'أوقف الطلبات الجديدة مؤقتًا.',recentJobs:'آخر العمليات',adminNote:'الأرقام هنا تخص جلسة التشغيل الحالية فقط.',openInTelegram:'افتح التطبيق من تيليجرام',telegramAuthRequired:'لازم تفتح الـ Mini App من زر البوت عشان نتحقق من حسابك بأمان.',openBot:'فتح البوت',loadingText:'بنجهز تجربة AHM X…',navHome:'الرئيسية',navHistory:'السجل',navSettings:'الإعدادات',navAdmin:'الإدارة',analysisRunning:'جاري فحص الرابط وجمع تفاصيل الفيديو…',qualityUnavailable:'لم يتم العثور على جودات فيديو متاحة لهذا الرابط.',inspectFailed:'تعذر تحليل الرابط. تأكد أن الفيديو عام وأن الموقع مدعوم.',pasteFirst:'الصق رابط الفيديو أولًا.',chooseQuality:'اختار جودة أو صوت قبل بدء التحميل.',chooseDelivery:'اختار طريقة الاستلام.',sendFailed:'تعذر بدء التحميل.',queue:'تم وضع طلبك في قائمة التنفيذ…',downloading:'جاري تنزيل الملف…',sending:'الملف جاهز، جاري إرساله إلى تيليجرام…',completed:'اكتملت العملية بنجاح ✅',failed:'فشل التحميل',expired:'انتهت صلاحية رابط التحميل. ابدأ العملية من جديد.',directReady:'الملف جاهز للتنزيل على جهازك.',selectQuality:'اختار الجودة المناسبة',estimated:'تقديري',unknownSize:'الحجم غير متاح',best:'أفضل جودة',audio:'صوت MP3',resolution:'الدقة',telegramMode:'إرسال إلى تيليجرام',browserMode:'تحميل مباشر',noHistory:'لسه مفيش تحميلات مسجلة في الجلسة دي.',statusCompleted:'مكتمل',statusFailed:'فشل',statusWorking:'قيد التنفيذ',statusInspected:'تم التحليل',historyTelegram:'تيليجرام',historyBrowser:'على الجهاز',userCount:'مستخدمون',completedCount:'عمليات مكتملة',runningCount:'عمليات جارية',maintenanceOn:'إيقاف الصيانة',maintenanceOff:'تشغيل الصيانة',maintenanceActive:'وضع الصيانة مفعّل؛ جرّب لاحقًا.',maintenanceUpdated:'تم تحديث وضع الصيانة.',noAdminJobs:'لا توجد عمليات حديثة.',sizeTooBig:'الحجم المتوقع يتجاوز حد الإرسال عبر تيليجرام. اختر التحميل على الجهاز أو جودة أقل.',telegramSent:'تم إرسال الملف إلى محادثة البوت.',browserDownload:'اضغط على زر التنزيل لفتح الرابط المؤقت.',pasteDenied:'لم أقدر أوصل للحافظة؛ الصق الرابط يدويًا.',formatLabel:'فيديو',views:'مشاهدة',seconds:'ث',minutes:'د',hours:'س',online:'متاح',blocked:'عذرًا، لا يمكنك استخدام هذه الميزة.',oneJob:'عندك عملية تحميل شغّالة بالفعل.',authExpired:'انتهت جلسة تيليجرام؛ اقفل التطبيق وافتحه من جديد.',maxTelegram:'حد تيليجرام التقريبي للملف هو 49 MB.',maxBrowser:'حد التنزيل المباشر في إعدادات المشروع 150 MB.'
-    },
-    en: {
-      secure:'Ready & secure',heroLabel:'Every video. One link.',heroTitleA:'Download your content',heroTitleB:'your preferred quality.',heroDescription:'One place to preview a video, choose quality, or extract audio — fast and simple.',moreSites:'More sites',pasteTitle:'Paste your video link',pasteSub:'A public link is all you need',urlPlaceholder:'https://...',inspectButton:'Analyze video',privacyLine:'Use public links and content you are authorized to download only.',detected:'VIDEO DETECTED',previewHeading:'Video preview',openSource:'Open source',qualityTitle:'Choose quality',qualitySub:'File size is an estimate and may change',deliveryTitle:'How should we deliver it?',deliverySub:'Choose the delivery method that works for you',telegramDeliveryTitle:'Send in Telegram',telegramDeliverySub:'Easy to save and share • up to 49 MB',browserDeliveryTitle:'Download to device',browserDeliverySub:'Temporary link • up to 150 MB, hosting permitting',downloadButton:'Start download',preparing:'Preparing your request…',progressHint:'The temporary copy is removed automatically after delivery.',directDownload:'Download file to device ↗',featureQuality:'Clear choices',featureQualitySub:'Available quality and size',featurePrivacy:'Privacy first',featurePrivacySub:'Temporary files only',featureEasy:'Simple interface',featureEasySub:'Designed for mobile',personalSpace:'YOUR SPACE',historyTitle:'Download history',refresh:'Refresh',historyNote:'History is kept in memory and may reset when the service restarts.',preferences:'PREFERENCES',settingsTitle:'Settings',languageSetting:'Interface language',languageSub:'Choose your preferred language',contentRule:'Responsible use',contentRuleSub:'Only download videos you own or are permitted to download.',tempFiles:'Temporary files',tempFilesSub:'Files are cleaned after delivery or link expiry.',adminTitle:'Admin console',maintenanceTitle:'Maintenance mode',maintenanceSub:'Temporarily stop new requests.',recentJobs:'Recent jobs',adminNote:'Counts apply to the current running session only.',openInTelegram:'Open this app in Telegram',telegramAuthRequired:'Launch this Mini App from the bot button so we can verify your account securely.',openBot:'Open bot',loadingText:'Preparing your AHM X experience…',navHome:'Home',navHistory:'History',navSettings:'Settings',navAdmin:'Admin',analysisRunning:'Checking link and retrieving video details…',qualityUnavailable:'No downloadable video qualities were found for this link.',inspectFailed:'Could not analyze this link. Check that the video is public and supported.',pasteFirst:'Paste a video link first.',chooseQuality:'Choose a quality or audio before downloading.',chooseDelivery:'Choose a delivery method.',sendFailed:'Could not start the download.',queue:'Your request was queued…',downloading:'Downloading file…',sending:'File ready, sending it to Telegram…',completed:'Completed successfully ✅',failed:'Download failed',expired:'This download link expired. Please start again.',directReady:'Your file is ready to download.',selectQuality:'Choose your preferred quality',estimated:'Estimated',unknownSize:'Size unavailable',best:'Best quality',audio:'MP3 audio',resolution:'Resolution',telegramMode:'Send to Telegram',browserMode:'Direct download',noHistory:'No downloads recorded in this session yet.',statusCompleted:'Completed',statusFailed:'Failed',statusWorking:'Working',statusInspected:'Analyzed',historyTelegram:'Telegram',historyBrowser:'Device',userCount:'Users',completedCount:'Completed',runningCount:'Running',maintenanceOn:'Disable maintenance',maintenanceOff:'Enable maintenance',maintenanceActive:'Maintenance is enabled; please try later.',maintenanceUpdated:'Maintenance mode updated.',noAdminJobs:'No recent jobs.',sizeTooBig:'Estimated file exceeds Telegram delivery limit. Choose device download or lower quality.',telegramSent:'File sent to your bot chat.',browserDownload:'Tap the download button to open the temporary link.',pasteDenied:'Clipboard access failed; paste the link manually.',formatLabel:'Video',views:'views',seconds:'s',minutes:'m',hours:'h',online:'Online',blocked:'This feature is not available to your account.',oneJob:'You already have a download running.',authExpired:'Telegram session expired; close and reopen the Mini App.',maxTelegram:'Telegram upload limit is approximately 49 MB.',maxBrowser:'Project direct-download limit is 150 MB.'
+  if (tg) { tg.ready(); tg.expand(); try { tg.setHeaderColor('#0b0709'); tg.setBackgroundColor('#0b0709'); } catch (_) {} }
+  const initData = tg?.initData || '';
+  const $ = (id) => document.getElementById(id);
+  const state = { user:null, isAdmin:false, isOwner:false, settings:{}, usage:{}, analysis:null, selectedChoice:null, currentJob:null, poller:null, historyOffset:0, historyHasMore:false, usersOffset:0, usersHasMore:false };
+  const formatSize = (bytes) => {
+    const n = Number(bytes || 0); if (!n) return 'الحجم غير معروف';
+    if (n < 1024*1024) return `${(n/1024).toFixed(0)} KB`;
+    return n < 1024**3 ? `${(n/1024**2).toFixed(1)} MB` : `${(n/1024**3).toFixed(2)} GB`;
+  };
+  async function api(path, options={}) {
+    const headers = { 'X-Telegram-Init-Data': initData, ...(options.headers || {}) };
+    if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+    const res = await fetch(path, {...options, headers});
+    let data = {};
+    try { data = await res.json(); } catch (_) {}
+    if (!res.ok) {
+      let message = data.detail || data.message || 'حصل خطأ أثناء تنفيذ الطلب.';
+      if (typeof message === 'object') message = message.message || JSON.stringify(message);
+      if (data.error_id && !String(message).includes(data.error_id)) message = `${message} · Diagnostic: ${data.error_id}`;
+      const err = new Error(String(message)); err.status = res.status; err.data = data.detail; err.errorId = data.error_id || ''; throw err;
     }
-  };
-  const tr = (key) => (t[state.lang] && t[state.lang][key]) || t.ar[key] || key;
-  const show = (el, yes = true) => el.classList.toggle('hidden', !yes);
-  const toast = (message, good = false) => { const el = $('notice'); el.textContent = message; el.classList.toggle('success', good); show(el, true); el.scrollIntoView({behavior:'smooth', block:'nearest'}); };
-  const clearToast = () => show($('notice'), false);
-  const formatSize = (bytes) => { if (!bytes || bytes <= 0) return tr('unknownSize'); const mb=bytes/1048576; return mb<1024 ? `≈ ${mb.toFixed(1)} MB` : `≈ ${(mb/1024).toFixed(2)} GB`; };
-  const fmtDuration = (seconds) => { if (seconds === null || seconds === undefined) return '—'; let n=Math.max(0, Number(seconds)||0); const h=Math.floor(n/3600), m=Math.floor((n%3600)/60), s=Math.floor(n%60); return h ? `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}` : `${m}:${String(s).padStart(2,'0')}`; };
-  const escapeHtml = (v) => String(v ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
-  const api = async (path, body = {}) => { const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...body,initData:state.initData})}); let data={}; try{data=await response.json()}catch{} if(!response.ok) throw new Error(data.detail || data.message || `HTTP ${response.status}`); return data; };
-  const switchPage = (page) => { ['home','historyPage','settingsPage','adminPage'].forEach(id => { const el=$(id); if(el) show(el,id===page); }); document.querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active',n.dataset.page===page)); if(page==='historyPage') loadHistory(); if(page==='adminPage' && state.isAdmin) loadAdmin(); window.scrollTo({top:0,behavior:'smooth'}); };
-  const updateLanguage = () => { document.documentElement.lang=state.lang; document.documentElement.dir=state.lang==='ar'?'rtl':'ltr'; document.body.dir=document.documentElement.dir; document.querySelectorAll('[data-i18n]').forEach(el=>{const k=el.dataset.i18n;if(tr(k)) el.textContent=tr(k)}); document.querySelectorAll('[data-i18n-placeholder]').forEach(el=>el.placeholder=tr(el.dataset.i18nPlaceholder)); $('langToggle').textContent=state.lang==='ar'?'EN':'عربي'; $('langAr').classList.toggle('active',state.lang==='ar'); $('langEn').classList.toggle('active',state.lang==='en'); localStorage.setItem('ahmx-lang',state.lang); if(state.choices) renderChoices(state.choices); };
-  const setBusy = (busy) => { $('inspectButton').disabled=busy; $('inspectButton').classList.toggle('is-busy',busy); $('inspectButton').querySelector('[data-i18n]').textContent=busy ? (state.lang==='ar'?'جاري التحليل…':'Analyzing…') : tr('inspectButton'); };
-  const renderChoices = (choices) => { state.choices=choices||[]; const grid=$('qualityGrid'); grid.innerHTML=''; if(!choices.length){grid.innerHTML=`<div class="empty-state">${escapeHtml(tr('qualityUnavailable'))}</div>`;$('downloadButton').disabled=true;return;}
-    choices.forEach((choice,index)=>{const button=document.createElement('button');button.type='button';button.className='quality-card';button.dataset.quality=choice.id;const isAudio=choice.id==='audio';button.innerHTML=`<span class="selected-mark">✓</span><span class="quality-main"><span class="quality-name">${escapeHtml(isAudio?tr('audio'):(choice.label || `${choice.height}p`))}</span>${choice.recommended?`<span class="quality-tag">${escapeHtml(state.lang==='ar'?'مقترح':'TOP')}</span>`:''}</span><span class="quality-size">${escapeHtml(choice.size_label||tr('unknownSize'))}</span><span class="quality-resolution">${isAudio?'MP3':`${escapeHtml(tr('resolution'))} · ${escapeHtml(choice.height)}p`}</span>`;button.addEventListener('click',()=>{state.selectedQuality=choice.id;document.querySelectorAll('.quality-card').forEach(c=>c.classList.toggle('selected',c===button));$('downloadButton').disabled=false;});grid.appendChild(button);if(index===0&&!state.selectedQuality) state.selectedQuality=choice.id;});
-    const init=grid.querySelector(`[data-quality="${CSS.escape(state.selectedQuality||choices[0].id)}"]`)||grid.querySelector('.quality-card');if(init){init.classList.add('selected');state.selectedQuality=init.dataset.quality;$('downloadButton').disabled=false;}
-  };
-  const renderInspection = (data) => { state.inspectId=data.inspect_id;state.title=data.title||'—';state.thumbnail=data.thumbnail||'';state.choices=data.choices||[];const img=$('thumbnail');if(data.thumbnail && /^https?:\/\//i.test(data.thumbnail)){img.src=data.thumbnail;img.onerror=()=>{img.removeAttribute('src');}}else img.removeAttribute('src');img.alt=data.title||'Thumbnail';$('videoTitle').textContent=data.title||'—';$('videoUploader').textContent=data.uploader||'—';$('videoDuration').textContent=fmtDuration(data.duration);$('durationBadge').textContent=fmtDuration(data.duration);$('viewCount').textContent=Number.isFinite(Number(data.view_count))&&data.view_count!==null?`• ${Number(data.view_count).toLocaleString()} ${tr('views')}`:'';$('platformBadge').textContent=(data.platform||'VIDEO').replace(/[^a-zA-Z0-9 _-]/g,'').slice(0,18).toUpperCase();$('sourceLink').href=data.webpage_url||data.url||'#';show($('previewSection'),true);show($('jobProgress'),false);$('downloadButton').disabled=!(state.choices.length);renderChoices(state.choices);$('previewSection').scrollIntoView({behavior:'smooth',block:'start'}); };
-  const sendInspect = async (url) => {clearToast();setBusy(true);try{const data=await api('/api/inspect',{url});renderInspection(data);toast(state.lang==='ar'?'تم تحليل الفيديو. اختار الجودة وطريقة الاستلام.':'Video analyzed. Choose a quality and delivery method.',true);}catch(err){toast(err.message==='maintenance'?tr('maintenanceActive'):`${tr('inspectFailed')} ${err.message==='Unauthorized'?tr('authExpired'):''}`);}finally{setBusy(false);} };
-  const selectedDelivery = () => document.querySelector('input[name="delivery"]:checked')?.value || 'telegram';
-  const updateDeliveryStyle = () => {document.querySelectorAll('.delivery-card').forEach(card=>card.classList.toggle('selected',card.querySelector('input').checked));};
-  const startDownload = async () => {clearToast();if(!state.inspectId){toast(tr('pasteFirst'));return;}if(!state.selectedQuality){toast(tr('chooseQuality'));return;}const delivery=selectedDelivery();const choice=state.choices.find(c=>c.id===state.selectedQuality);if(delivery==='telegram' && choice?.size_bytes && choice.size_bytes>49*1048576){toast(tr('sizeTooBig'));return;}$('downloadButton').disabled=true;show($('jobProgress'),true);$('progressBar').style.width='0%';$('progressPercent').textContent='0%';$('progressMessage').textContent=tr('queue');show($('directDownloadLink'),false);try{const result=await api('/api/download',{inspect_id:state.inspectId,quality:state.selectedQuality,delivery});state.activeJob=result.job_id;pollJob(result.job_id);}catch(err){$('downloadButton').disabled=false;toast(err.message==='maintenance'?tr('maintenanceActive'):`${tr('sendFailed')} ${err.message}`);} };
-  const pollJob = async (jobId) => {if(state.pollTimer)clearTimeout(state.pollTimer);try{const data=await api('/api/job',{job_id:jobId});const pct=Math.max(0,Math.min(100,Number(data.progress)||0));$('progressBar').style.width=`${pct}%`;$('progressPercent').textContent=`${pct}%`;$('progressMessage').textContent=data.message||tr('downloading');if(data.status==='completed'){ $('progressBar').style.width='100%';$('progressPercent').textContent='100%';if(data.delivery==='browser'&&data.download_url){$('progressMessage').textContent=tr('directReady');$('directDownloadLink').href=data.download_url;show($('directDownloadLink'),true);toast(tr('browserDownload'),true);}else{ $('progressMessage').textContent=tr('completed');toast(tr('telegramSent'),true);} $('downloadButton').disabled=false;state.activeJob=null;return;}if(data.status==='failed'){ $('progressMessage').textContent=tr('failed');$('progressHint').textContent=data.error||tr('failed');$('downloadButton').disabled=false;state.activeJob=null;toast(data.error||tr('failed'));return;}state.pollTimer=setTimeout(()=>pollJob(jobId),1800);}catch(err){$('progressMessage').textContent=tr('downloading');state.pollTimer=setTimeout(()=>pollJob(jobId),3000);} };
-  const renderHistory = (items) => {const root=$('historyList');if(!items?.length){root.innerHTML=`<div class="empty-state">${escapeHtml(tr('noHistory'))}</div>`;return;}root.innerHTML=items.map(item=>{const done=item.status==='completed', failed=item.status==='failed';const st=done?tr('statusCompleted'):failed?tr('statusFailed'):tr('statusWorking');const when=new Date((item.created||0)*1000);const mode=item.delivery==='browser'?tr('historyBrowser'):tr('historyTelegram');return `<div class="history-card"><div class="history-thumb">X</div><div class="history-info"><b>${escapeHtml(item.title||'AHM X Video')}</b><small>${escapeHtml(item.quality_label||item.quality||'')} · ${escapeHtml(mode)} · ${escapeHtml(when.toLocaleString(state.lang==='ar'?'ar-EG':'en-US',{dateStyle:'short',timeStyle:'short'}))}</small></div><span class="history-status ${failed?'failed':''}">${escapeHtml(st)}</span></div>`;}).join('');};
-  const loadHistory = async () => {try{const data=await api('/api/history');renderHistory(data.items||[]);}catch(err){$('historyList').innerHTML=`<div class="empty-state">${escapeHtml(err.message||tr('failed'))}</div>`;}};
-  const loadAdmin = async () => {try{const data=await api('/api/admin/overview');const stats=[['userCount',data.users],['completedCount',data.completed],['runningCount',data.running]];$('adminStats').innerHTML=stats.map(([key,value])=>`<div class="admin-stat"><span>${escapeHtml(tr(key))}</span><b>${Number(value||0).toLocaleString()}</b></div>`).join('');state.maintenance=!!data.maintenance;$('maintenanceToggle').textContent=state.maintenance?tr('maintenanceOn'):tr('maintenanceOff');$('adminRecent').innerHTML=(data.recent||[]).map(item=>`<div class="history-card"><div class="history-thumb">X</div><div class="history-info"><b>${escapeHtml(item.title||'—')}</b><small>${escapeHtml(item.quality_label||item.quality||'')} · ${escapeHtml(item.status||'')}</small></div></div>`).join('')||`<div class="empty-state">${escapeHtml(tr('noAdminJobs'))}</div>`;}catch(err){toast(err.message||tr('blocked'));}};
-  const initialize = async () => {try{if(tg){tg.ready();tg.expand();try{tg.setHeaderColor('#09080a');tg.setBackgroundColor('#09080a');}catch{}}const cfg=await fetch('/api/public-config').then(r=>r.json());state.botUsername=cfg.bot_username||'';if(state.botUsername)$('openBotButton').href=`https://t.me/${state.botUsername}`;if(!state.initData){show($('browserGate'),true);document.querySelectorAll('.hero,.link-panel,.feature-strip,.bottom-nav').forEach(el=>show(el,false));show($('previewSection'),false);return;}const session=await api('/api/session');state.user=session.user;state.isAdmin=!!session.is_admin;state.maintenance=!!session.maintenance;state.initDataValid=true;show($('adminNav'),state.isAdmin);$('statusPill').querySelector('span').textContent=tr('secure');if(session.maintenance)toast(tr('maintenanceActive'));}catch(err){if(!state.initData){show($('browserGate'),true);}else toast(err.message||tr('authExpired'));}finally{show($('loadingOverlay'),false);}};
-  $('inspectForm').addEventListener('submit',e=>{e.preventDefault();const url=$('videoUrl').value.trim();if(!url){toast(tr('pasteFirst'));return;}state.selectedQuality=null;sendInspect(url);});
-  $('pasteButton').addEventListener('click',async()=>{try{$('videoUrl').value=await navigator.clipboard.readText();$('videoUrl').focus();}catch{toast(tr('pasteDenied'));}});
-  $('downloadButton').addEventListener('click',startDownload);
-  document.querySelectorAll('input[name="delivery"]').forEach(input=>input.addEventListener('change',updateDeliveryStyle));
-  $('langToggle').addEventListener('click',()=>{state.lang=state.lang==='ar'?'en':'ar';updateLanguage();});$('langAr').addEventListener('click',()=>{state.lang='ar';updateLanguage();});$('langEn').addEventListener('click',()=>{state.lang='en';updateLanguage();});
-  document.querySelectorAll('.nav-item').forEach(item=>item.addEventListener('click',()=>switchPage(item.dataset.page)));
-  $('refreshHistory').addEventListener('click',loadHistory);$('refreshAdmin').addEventListener('click',loadAdmin);$('maintenanceToggle').addEventListener('click',async()=>{if(!state.isAdmin)return;try{const data=await api('/api/admin/maintenance',{enabled:!state.maintenance});state.maintenance=data.maintenance;$('maintenanceToggle').textContent=state.maintenance?tr('maintenanceOn'):tr('maintenanceOff');toast(tr('maintenanceUpdated'),true);}catch(err){toast(err.message||tr('failed'));}});
-  updateLanguage();updateDeliveryStyle();initialize();
+    return data;
+  }
+  let toastTimer;
+  function toast(message, kind='') {
+    const el = $('toast'); el.textContent = message; el.className = `toast show ${kind}`;
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => { el.className = 'toast'; }, 3700);
+  }
+  function setBusy(button, busy, busyText='جاري التنفيذ…') {
+    if (!button) return;
+    if (busy) { button.dataset.oldText = button.querySelector('span')?.textContent || button.textContent; button.disabled = true; if (button.querySelector('span')) button.querySelector('span').textContent = busyText; }
+    else { button.disabled = false; if (button.querySelector('span') && button.dataset.oldText) button.querySelector('span').textContent = button.dataset.oldText; }
+  }
+  function showTab(tab) {
+    document.querySelectorAll('.tab').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
+    $('downloadView').classList.toggle('active-view', tab === 'download'); $('downloadView').classList.toggle('hidden', tab !== 'download');
+    $('historyView').classList.toggle('active-view', tab === 'history'); $('historyView').classList.toggle('hidden', tab !== 'history');
+    $('adminView').classList.toggle('active-view', tab === 'admin'); $('adminView').classList.toggle('hidden', tab !== 'admin');
+    if (tab === 'history') loadHistory(); if (tab === 'admin' && state.isAdmin) loadAdminSettings();
+  }
+  document.querySelectorAll('.tab').forEach(el => el.addEventListener('click', () => showTab(el.dataset.tab)));
+  function updateUsage(usage) {
+    if (!usage) return; state.usage = usage;
+    $('usedToday').textContent = Number(usage.completed_today || 0) + Number(usage.active_today || 0);
+    $('dailyLimit').textContent = usage.daily_limit ?? state.settings.daily_limit ?? 8;
+    $('remainingToday').textContent = usage.remaining_today ?? 0;
+    $('totalDownloads').textContent = usage.completed_total ?? 0;
+    const pct = usage.daily_limit ? Math.min(100, ((usage.completed_today + usage.active_today) / usage.daily_limit) * 100) : 0;
+    $('dailyProgress').style.width = `${pct}%`;
+  }
+  function qualityTile(fmt) {
+    const button = document.createElement('button'); button.type = 'button'; button.className = `format-option${state.selectedChoice === fmt.choice ? ' selected' : ''}`;
+    const mark = document.createElement('span'); mark.className = 'format-mark'; mark.textContent = fmt.choice === 'audio' ? 'MP3' : fmt.label;
+    const content = document.createElement('span'); content.className = 'format-content';
+    const label = document.createElement('span'); label.className = 'format-label'; label.textContent = fmt.choice === 'audio' ? 'استخراج الصوت' : `فيديو ${fmt.label}`;
+    const size = document.createElement('span'); size.className = 'format-size'; size.textContent = fmt.size_text || formatSize(fmt.size);
+    const check = document.createElement('span'); check.className = 'format-check'; check.textContent = '✓';
+    content.append(label,size); button.append(mark,content,check);
+    button.addEventListener('click', () => { state.selectedChoice = fmt.choice; document.querySelectorAll('.format-option').forEach(n => n.classList.remove('selected')); button.classList.add('selected'); $('downloadButton').disabled = false; });
+    return button;
+  }
+  async function analyze() {
+    const url = $('urlInput').value.trim(); if (!url) return toast('الصق رابط الفيديو الأول.', 'bad');
+    setBusy($('analyzeButton'), true, 'جاري تحليل الرابط…'); $('videoCard').classList.add('hidden'); $('jobPanel').classList.add('hidden'); state.analysis = null; state.selectedChoice = null;
+    try {
+      const data = await api('/api/analyze', {method:'POST', body:JSON.stringify({url})});
+      state.analysis = data.video; state.selectedChoice = data.video.formats?.[0]?.choice || null;
+      renderVideo(data.video); $('videoCard').classList.remove('hidden'); $('videoCard').scrollIntoView({behavior:'smooth',block:'start'}); toast('تم تحليل الرابط بنجاح.', 'good');
+    } catch (err) { toast(err.message, 'bad'); if (err.status === 503) setMaintenanceBanner(); }
+    finally { setBusy($('analyzeButton'), false); updateUsageSafe(); }
+  }
+  function renderVideo(video) {
+    $('videoTitle').textContent = video.title || 'فيديو بدون عنوان'; $('videoMeta').textContent = `${video.uploader || 'ناشر غير معروف'} · ${video.duration || 'المدة غير متاحة'}${video.views ? ` · ${Number(video.views).toLocaleString()} مشاهدة` : ''}`;
+    $('platformBadge').textContent = String(video.platform || 'VIDEO').toUpperCase();
+    $('durationBadge').textContent = video.duration || '--:--';
+    const thumb = $('thumbnail');
+    if (video.thumbnail && /^https:\/\//i.test(video.thumbnail)) { thumb.src = video.thumbnail; thumb.classList.remove('hidden'); $('thumbFallback').classList.add('hidden'); thumb.onerror = () => { thumb.classList.add('hidden'); $('thumbFallback').classList.remove('hidden'); }; }
+    else { thumb.removeAttribute('src'); thumb.classList.add('hidden'); $('thumbFallback').classList.remove('hidden'); }
+    if (video.note) { $('providerNote').textContent = video.note; $('providerNote').classList.remove('hidden'); } else $('providerNote').classList.add('hidden');
+    const formats = $('formatOptions'); formats.replaceChildren();
+    (video.formats || []).forEach(fmt => formats.appendChild(qualityTile(fmt)));
+    $('downloadButton').disabled = !state.selectedChoice || !video.formats?.length;
+  }
+  function renderJob(job) {
+    $('jobPanel').classList.remove('hidden'); $('jobPhase').textContent = job.phase || 'جاري التنفيذ…';
+    const pct = Math.max(0, Math.min(100, Number(job.progress || 0)));
+    $('jobPercent').textContent = `${Math.floor(pct)}%`; $('jobProgress').style.width = `${pct}%`;
+    const d = Number(job.downloaded_bytes || 0), t = Number(job.total_bytes || 0);
+    $('jobBytes').textContent = `${formatSize(d)} / ${t ? formatSize(t) : 'حجم غير معروف'}`;
+    $('jobSpeed').textContent = job.speed || job.platform || 'جارٍ التحميل';
+    $('cancelJobButton').classList.toggle('hidden', !['queued','running'].includes(job.status));
+    $('saveFileButton').classList.toggle('hidden', job.status !== 'completed');
+    $('jobMessage').classList.toggle('hidden', !['failed','cancelled'].includes(job.status));
+    if (job.status === 'failed') $('jobMessage').textContent = `فشل التنزيل. رقم التشخيص: ${job.error_id || 'غير متاح'} — ${job.error_message || ''}`;
+    else if (job.status === 'cancelled') $('jobMessage').textContent = 'تم إلغاء العملية.';
+    else if (job.status === 'completed') $('jobMessage').textContent = 'اكتمل التنزيل. اضغط حفظ الملف لنقله إلى جهازك.';
+  }
+  async function startDownload() {
+    if (!state.analysis || !state.selectedChoice) return toast('اختار الجودة الأول.', 'bad');
+    setBusy($('downloadButton'), true, 'جاري بدء التنزيل…');
+    try {
+      const data = await api('/api/download', {method:'POST', body:JSON.stringify({analysis_id:state.analysis.analysis_id, choice:state.selectedChoice})});
+      state.currentJob = data.job_id; $('jobPanel').classList.remove('hidden'); renderJob({status:'queued',phase:'تم وضع طلبك في قائمة الانتظار',progress:0,downloaded_bytes:0,total_bytes:0});
+      $('jobPanel').scrollIntoView({behavior:'smooth',block:'start'}); beginPolling(data.job_id); toast('بدأنا تجهيز الملف.', 'good');
+    } catch (err) { toast(err.message, 'bad'); if (err.status === 503) setMaintenanceBanner(); }
+    finally { setBusy($('downloadButton'), false); }
+  }
+  function beginPolling(jobId) {
+    if (state.poller) clearInterval(state.poller);
+    let pollCount = 0;
+    const poll = async () => {
+      try {
+        const job = await api(`/api/jobs/${encodeURIComponent(jobId)}`); renderJob(job); pollCount += 1;
+        if (pollCount % 5 === 0 || ['completed','failed','cancelled'].includes(job.status)) await updateUsageSafe();
+        if (['completed','failed','cancelled'].includes(job.status)) { clearInterval(state.poller); state.poller = null; state.currentJob = jobId; loadHistory(false); if (job.status === 'completed') toast('اكتمل الملف — تقدر تحفظه دلوقتي.', 'good'); }
+      } catch (err) { clearInterval(state.poller); state.poller = null; toast(err.message, 'bad'); }
+    };
+    poll(); state.poller = setInterval(poll, 1300);
+  }
+  async function saveFile() {
+    if (!state.currentJob) return;
+    const button = $('saveFileButton'); setBusy(button, true, 'جاري تجهيز الملف…');
+    try {
+      const response = await fetch(`/api/jobs/${encodeURIComponent(state.currentJob)}/file`, {headers:{'X-Telegram-Init-Data':initData}});
+      if (!response.ok) { let d={}; try {d=await response.json();} catch (_){} throw new Error(d.detail || 'الملف غير متاح أو انتهت صلاحيته.'); }
+      const blob = await response.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'AHMX-download'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 30_000); toast('بدأ حفظ الملف على جهازك.', 'good');
+    } catch (err) { toast(err.message, 'bad'); }
+    finally { setBusy(button, false); }
+  }
+  async function cancelJob() {
+    if (!state.currentJob) return;
+    try { await api(`/api/jobs/${encodeURIComponent(state.currentJob)}/cancel`, {method:'POST'}); toast('وصل طلب الإلغاء.'); }
+    catch (err) { toast(err.message, 'bad'); }
+  }
+  function statusLabel(status) { return ({completed:'مكتمل',failed:'فشل',queued:'في الانتظار',running:'جاري التحميل',cancelled:'أُلغي'})[status] || status; }
+  async function loadHistory(append=false) {
+    try {
+      if (!append) state.historyOffset = 0;
+      const data = await api(`/api/history?limit=50&offset=${state.historyOffset}`); updateUsage(data.usage);
+      const list = $('historyList'); if (!append) list.replaceChildren();
+      if (!data.items?.length && !append) { list.innerHTML = '<div class="empty-state"><span>◷</span><b>لسه مفيش تنزيلات</b><small>أول تنزيل ليك هيظهر هنا.</small></div>'; }
+      data.items.forEach(item => {
+        const row = document.createElement('div'); row.className = 'history-item';
+        const icon = document.createElement('div'); icon.className = 'history-icon'; icon.textContent = item.choice === 'audio' ? '♫' : '▶';
+        const info = document.createElement('div'); info.className = 'history-info';
+        const title = document.createElement('div'); title.className = 'history-title'; title.textContent = item.title || 'فيديو بدون عنوان';
+        const sub = document.createElement('div'); sub.className = 'history-sub'; sub.textContent = `${item.platform} · ${item.choice === 'audio' ? 'MP3' : item.choice+'p'} · ${formatSize(item.file_size)} · ${new Date(item.created_at).toLocaleString()}`;
+        const status = document.createElement('div'); status.className = `history-status status-${item.status}`; status.textContent = statusLabel(item.status);
+        info.append(title,sub); row.append(icon,info,status); list.appendChild(row);
+      });
+      state.historyOffset = data.next_offset || (state.historyOffset + (data.items||[]).length); state.historyHasMore = !!data.has_more;
+      $('loadMoreHistoryButton').classList.toggle('hidden', !state.historyHasMore);
+    } catch (err) { toast(err.message, 'bad'); }
+  }
+  async function updateUsageSafe() { try { const d = await api('/api/bootstrap'); updateUsage(d.usage); } catch (_) {} }
+  function setMaintenanceBanner() { $('welcomeText').textContent = 'الخدمة في وضع الصيانة حاليًا. جرّب لاحقًا.'; }
+  async function loadBootstrap() {
+    try {
+      const data = await api('/api/bootstrap'); state.user = data.user; state.isAdmin = data.is_admin; state.isOwner = data.is_owner; state.settings = data.settings || {}; updateUsage(data.usage);
+      $('welcomeText').textContent = data.maintenance ? 'الخدمة في وضع الصيانة حاليًا.' : `أهلًا ${data.user.name || ''}، حط الرابط وابدأ.`;
+      $('analyzeButton').disabled = !!data.maintenance && !data.is_admin; if (data.maintenance && !data.is_admin) { $('downloadButton').disabled = true; toast('الخدمة تحت الصيانة حاليًا.', 'bad'); } else if (state.analysis?.formats?.length) { $('downloadButton').disabled = !state.selectedChoice; }
+      if (data.is_admin) $('adminTab').classList.remove('hidden');
+    } catch (err) {
+      $('welcomeText').textContent = 'افتح التطبيق من زر تيليجرام الرسمي للتحقق من هويتك.';
+      $('analyzeButton').disabled = true; toast(`تعذر التحقق من جلسة Telegram: ${err.message}`, 'bad');
+    }
+  }
+  async function loadAdminSettings() {
+    try {
+      const data = await api('/api/admin/settings'); state.settings = data.settings;
+      const settings = data.settings;
+      ['maintenance_mode','downloads_enabled','youtube_enabled','facebook_enabled','instagram_enabled','generic_enabled','audio_enabled','owner_alerts_enabled','allow_private_chats_only'].forEach(key => { const el=$(`setting_${key}`); if(el) el.checked=!!settings[key]; });
+      ['max_concurrent','daily_limit','max_upload_mb','max_video_height','cooldown_seconds'].forEach(key => { const el=$(`setting_${key}`); if(el) el.value=settings[key]; });
+      const stats = $('statsGrid'); stats.replaceChildren();
+      [['users','مستخدمون'],['today_jobs','طلبات اليوم'],['completed','مكتمل'],['failed','فشل'],['active','نشط'],['errors','أخطاء']].forEach(([k,label]) => { const card=document.createElement('div');card.className='stat-card';const n=document.createElement('strong');n.textContent=data.stats[k]??0;const l=document.createElement('span');l.textContent=label;card.append(n,l);stats.appendChild(card); });
+      $('adminOwnerTools').classList.toggle('hidden', !state.isOwner);
+      if (state.isOwner) renderAdmins(data.admins || []);
+      await loadUsers();
+    } catch (err) { toast(err.message, 'bad'); }
+  }
+  async function saveAdminSettings() {
+    const keysBool=['maintenance_mode','downloads_enabled','youtube_enabled','facebook_enabled','instagram_enabled','generic_enabled','audio_enabled','owner_alerts_enabled','allow_private_chats_only'];
+    const patch={}; keysBool.forEach(key => patch[key]=$(`setting_${key}`).checked);
+    ['max_concurrent','daily_limit','max_upload_mb','max_video_height','cooldown_seconds'].forEach(key => patch[key]=Number($(`setting_${key}`).value));
+    setBusy($('saveSettingsButton'), true, 'جاري الحفظ…');
+    try { const data=await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify(patch)});state.settings=data.settings;$('settingsMessage').textContent='✅ تم حفظ الإعدادات. التعديلات أصبحت سارية فورًا.';$('settingsMessage').classList.remove('hidden');toast('تم حفظ الإعدادات.', 'good');await loadBootstrap(); }
+    catch(err){$('settingsMessage').textContent=`❌ ${err.message}`;$('settingsMessage').classList.remove('hidden');toast(err.message,'bad');}
+    finally{setBusy($('saveSettingsButton'),false);}
+  }
+  async function loadErrors() {
+    try {
+      const data=await api('/api/admin/errors'); const list=$('errorsList'); list.replaceChildren();
+      if (!data.items?.length) { list.innerHTML='<div class="empty-state"><span>✓</span><b>لا توجد أخطاء محفوظة</b><small>السجل نظيف حاليًا.</small></div>';return; }
+      data.items.forEach(err=>{const card=document.createElement('div');card.className='error-item';const head=document.createElement('div');head.className='error-title';const code=document.createElement('span');code.textContent=`${err.error_id} · ${err.source}`;const type=document.createElement('span');type.textContent=err.error_type;head.append(code,type);const msg=document.createElement('div');msg.className='error-msg';msg.textContent=`${err.created_at} · ${err.platform||'غير محدد'} · ${err.source_hint||''}\n${err.message||''}`;const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent='عرض Stack Trace';const trace=document.createElement('pre');trace.className='error-trace';trace.textContent=err.traceback_text||'لم يتم حفظ Stack Trace';details.append(summary,trace);card.append(head,msg,details);list.appendChild(card);});
+    } catch(err){toast(err.message,'bad');}
+  }
+  function renderAdmins(admins) {
+    const list=$('adminsList'); list.replaceChildren();
+    if(!admins.length){list.innerHTML='<div class="empty-state"><small>قائمة المشرفين غير متاحة.</small></div>';return;}
+    admins.forEach(a=>{const row=document.createElement('div');row.className='admin-id';const label=document.createElement('span');label.textContent=`ID: ${a.user_id} ${a.user_id===state.user?.id?'(أنت)':''}`;const date=document.createElement('small');date.textContent=a.added_at || '';row.append(label,date);if(a.user_id!==state.user?.id){const remove=document.createElement('button');remove.className='small-action';remove.textContent='إزالة';remove.addEventListener('click',()=>removeAdmin(a.user_id));row.appendChild(remove);}list.appendChild(row);});
+  }
+  async function addAdmin(){const id=Number($('newAdminId').value);if(!id)return toast('أدخل Telegram User ID صحيحًا.','bad');try{const data=await api('/api/admin/admins',{method:'POST',body:JSON.stringify({user_id:id})});renderAdmins(data.admins);$('newAdminId').value='';toast('تمت إضافة المشرف.','good');}catch(err){toast(err.message,'bad');}}
+  async function loadUsers(append=false){
+    const offset=append?state.usersOffset:0;
+    try{
+      const data=await api(`/api/admin/users?limit=30&offset=${offset}`);
+      renderUsers(data.items||[],append);
+      state.usersOffset=data.next_offset??(offset+(data.items||[]).length);state.usersHasMore=!!data.has_more;
+      $('loadMoreUsersButton').classList.toggle('hidden',!state.usersHasMore);
+    }catch(err){toast(err.message,'bad');}
+  }
+  function renderUsers(users,append=false){
+    const list=$('usersList');if(!append)list.replaceChildren();
+    if(!users.length&&!append){list.innerHTML='<div class="empty-state"><small>لا يوجد مستخدمون مسجلون حتى الآن.</small></div>';return;}
+    users.forEach(u=>{
+      const row=document.createElement('div');row.className='user-admin-row';
+      const main=document.createElement('div');main.className='user-admin-main';
+      const name=document.createElement('b');name.textContent=(u.first_name||u.username||'مستخدم')+(u.username?` · @${u.username}`:'');
+      const meta=document.createElement('small');meta.textContent=`ID ${u.user_id} · اليوم ${u.completed_today||0} · الإجمالي ${u.completed_total||0} · فشل ${u.failed_total||0}`;
+      const quota=document.createElement('small');quota.textContent=`المتبقي ${u.remaining_today??0} من ${u.effective_daily_limit??8}${u.daily_limit_override?' · حد مخصص':''}`;
+      main.append(name,meta,quota);row.append(main);
+      const actions=document.createElement('div');actions.className='user-admin-actions';
+      if(!u.is_admin&&!u.is_owner){
+        const block=document.createElement('button');block.className='small-action';block.textContent=u.blocked?'فك الحظر':'حظر';block.addEventListener('click',()=>updateUser(u.user_id,{blocked:!u.blocked}));actions.appendChild(block);
+        const limit=document.createElement('button');limit.className='small-action';limit.textContent='الحد اليومي';limit.addEventListener('click',()=>setUserLimit(u));actions.appendChild(limit);
+      }else{const protectedLabel=document.createElement('small');protectedLabel.className='user-protected';protectedLabel.textContent=u.is_owner?'المالك':'مشرف';actions.appendChild(protectedLabel);}
+      row.append(actions);list.appendChild(row);
+    });
+  }
+  async function updateUser(id,patch){
+    const action=patch.blocked===true?'إيقاف استخدام هذا الحساب':patch.blocked===false?'فك حظر هذا الحساب':'تعديل هذا المستخدم';
+    if(!confirm(`${action}؟`))return;
+    try{await api(`/api/admin/users/${id}`,{method:'PATCH',body:JSON.stringify(patch)});toast('تم تحديث صلاحيات المستخدم.','good');await loadUsers();await loadAdminSettings();}
+    catch(err){toast(err.message,'bad');}
+  }
+  async function setUserLimit(user){
+    const current=user.daily_limit_override==null?'':String(user.daily_limit_override);
+    const answer=prompt('اكتب الحد اليومي من 1 إلى 100. اتركه فارغًا لاستخدام الحد العام:',current);
+    if(answer===null)return;
+    let limit=null;
+    if(answer.trim()!==''){limit=Number(answer);if(!Number.isInteger(limit)||limit<1||limit>100)return toast('اكتب رقمًا صحيحًا من 1 إلى 100 أو اتركه فارغًا.','bad');}
+    try{await api(`/api/admin/users/${user.user_id}`,{method:'PATCH',body:JSON.stringify({daily_limit_override:limit})});toast('تم تحديث الحد اليومي.','good');await loadUsers();}
+    catch(err){toast(err.message,'bad');}
+  }
+  async function removeAdmin(id){if(!confirm(`إزالة صلاحيات ${id}؟`))return;try{const data=await api(`/api/admin/admins/${id}`,{method:'DELETE'});renderAdmins(data.admins);toast('تمت إزالة المشرف.','good');}catch(err){toast(err.message,'bad');}}
+  $('analyzeButton').addEventListener('click', analyze); $('downloadButton').addEventListener('click', startDownload); $('saveFileButton').addEventListener('click', saveFile); $('cancelJobButton').addEventListener('click', cancelJob);
+  $('refreshButton').addEventListener('click', async()=>{await loadBootstrap();if(state.isAdmin)await loadAdminSettings();toast('تم تحديث المعلومات.','good');});
+  $('historyRefresh').addEventListener('click', () => loadHistory(false)); $('loadMoreHistoryButton').addEventListener('click', () => loadHistory(true)); $('saveSettingsButton').addEventListener('click', saveAdminSettings); $('loadErrorsButton').addEventListener('click', loadErrors); $('loadUsersButton').addEventListener('click', () => loadUsers(false)); $('loadMoreUsersButton').addEventListener('click', () => loadUsers(true)); $('addAdminButton').addEventListener('click', addAdmin);
+  $('pasteButton').addEventListener('click', async()=>{try{$('urlInput').value=await navigator.clipboard.readText();toast('تم لصق الرابط.','good');}catch(_){$('urlInput').focus();toast('استخدم لصق من لوحة مفاتيح الموبايل.');}});
+  $('urlInput').addEventListener('keydown',e=>{if(e.key==='Enter')analyze();});
+  loadBootstrap();
 })();
