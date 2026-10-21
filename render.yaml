@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: ahm-x-video-downloader
+    runtime: docker
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /health
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
