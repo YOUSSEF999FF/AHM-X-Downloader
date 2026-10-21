@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0a080a">
+  <meta name="description" content="AHM X Downloader — حمّل الفيديوهات العامة المصرح بها من رابط واحد.">
+  <title>AHM X Downloader</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://telegram.org/js/telegram-web-app.js?64"></script>
+</head>
+<body>
+  <div class="ambient ambient-a"></div><div class="ambient ambient-b"></div>
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="#home" aria-label="AHM X Downloader Home">
+        <span class="brand-mark"><span class="brand-x">X</span><i></i></span>
+        <span class="brand-copy"><strong>AHM <em>X</em></strong><small>VIDEO DOWNLOADER</small></span>
+      </a>
+      <div class="top-actions">
+        <span id="statusPill" class="status-pill"><i></i><span data-i18n="secure">آمن وجاهز</span></span>
+        <button id="langToggle" class="icon-button lang-button" aria-label="Change language">EN</button>
+      </div>
+    </header>
+
+    <main id="home" class="main-content">
+      <section class="hero">
+        <div class="hero-label"><span class="sparkle">✦</span><span data-i18n="heroLabel">كل فيديو. رابط واحد.</span></div>
+        <h1><span data-i18n="heroTitleA">نزّل محتواك</span><br><span class="gradient-text" data-i18n="heroTitleB">بجودتك المفضّلة.</span></h1>
+        <p class="hero-description" data-i18n="heroDescription">واجهة واحدة لمعاينة الفيديو، اختيار الجودة، أو استخراج الصوت — بسرعة ومن غير تعقيد.</p>
+        <div class="source-list" aria-label="Supported platforms">
+          <span class="source-chip"><b class="source-dot youtube"></b>YouTube</span>
+          <span class="source-chip"><b class="source-dot facebook"></b>Facebook</span>
+          <span class="source-chip"><b class="source-dot instagram"></b>Instagram</span>
+          <span class="source-chip"><b class="source-dot tiktok"></b>TikTok</span>
+          <span class="source-chip more-chip">+ <span data-i18n="moreSites">مواقع أخرى</span></span>
+        </div>
+      </section>
+
+      <section class="panel link-panel" aria-labelledby="linkTitle">
+        <div class="panel-heading">
+          <div class="heading-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13.5a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1"/><path d="M14 10.5a5 5 0 0 0-7.1 0l-2 2a5 5 0 0 0 7.1 7.1l1.1-1.1"/></svg></div>
+          <div><h2 id="linkTitle" data-i18n="pasteTitle">حط رابط الفيديو هنا</h2><p data-i18n="pasteSub">الرابط العام هو كل اللي محتاجه</p></div>
+        </div>
+        <form id="inspectForm" class="url-form">
+          <label class="url-input-wrap" for="videoUrl">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13.5a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1"/><path d="M14 10.5a5 5 0 0 0-7.1 0l-2 2a5 5 0 0 0 7.1 7.1l1.1-1.1"/></svg>
+            <input id="videoUrl" type="url" inputmode="url" autocomplete="url" placeholder="https://..." data-i18n-placeholder="urlPlaceholder" required>
+            <button class="paste-button" type="button" id="pasteButton" title="Paste"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="3" width="8" height="4" rx="1"/><path d="M8 5H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/></svg></button>
+          </label>
+          <button id="inspectButton" class="primary-button" type="submit"><span data-i18n="inspectButton">تحليل الفيديو</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+        </form>
+        <div class="privacy-line"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11Z"/><path d="m9 12 2 2 4-4"/></svg><span data-i18n="privacyLine">استخدم الروابط العامة والمحتوى المسموح لك بتنزيله فقط.</span></div>
+      </section>
+
+      <div id="notice" class="notice hidden" role="status" aria-live="polite"></div>
+
+      <section id="previewSection" class="panel preview-panel hidden" aria-labelledby="previewTitle">
+        <div class="section-topline"><div><span class="eyebrow" data-i18n="detected">VIDEO DETECTED</span><h2 id="previewTitle" data-i18n="previewHeading">معاينة الفيديو</h2></div><span id="platformBadge" class="platform-badge">VIDEO</span></div>
+        <div class="video-preview">
+          <div class="thumbnail-wrap"><img id="thumbnail" alt="Video thumbnail"><span class="duration-badge" id="durationBadge">--:--</span><span class="thumbnail-shine"></span></div>
+          <div class="video-details"><h3 id="videoTitle">—</h3><div class="meta-row"><span class="meta-icon">◉</span><span id="videoUploader">—</span></div><div class="meta-row"><span class="meta-icon">◷</span><span id="videoDuration">—</span><span id="viewCount" class="views-text"></span></div><a id="sourceLink" class="source-link" href="#" target="_blank" rel="noopener noreferrer"><span data-i18n="openSource">فتح المصدر</span><span>↗</span></a></div>
+        </div>
+        <div class="quality-heading"><div><h3 data-i18n="qualityTitle">اختار الجودة</h3><p data-i18n="qualitySub">الحجم تقديري وقد يختلف بعد التحميل</p></div><span class="quality-symbol">▤</span></div>
+        <div id="qualityGrid" class="quality-grid"></div>
+        <div class="delivery-heading"><div><h3 data-i18n="deliveryTitle">هتستلم الملف إزاي؟</h3><p data-i18n="deliverySub">اختار طريقة التسليم المناسبة</p></div></div>
+        <div class="delivery-options">
+          <label class="delivery-card selected" id="telegramDelivery"><input type="radio" name="delivery" value="telegram" checked><span class="delivery-icon"><svg viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg></span><span class="delivery-text"><b data-i18n="telegramDeliveryTitle">إرسال داخل تيليجرام</b><small data-i18n="telegramDeliverySub">أسهل في الحفظ والمشاركة • حتى 49 MB</small></span><span class="radio-dot"></span></label>
+          <label class="delivery-card" id="browserDelivery"><input type="radio" name="delivery" value="browser"><span class="delivery-icon"><svg viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5"/><path d="M5 16v4h14v-4"/></svg></span><span class="delivery-text"><b data-i18n="browserDeliveryTitle">تحميل على الجهاز</b><small data-i18n="browserDeliverySub">رابط مؤقت • حتى 150 MB حسب الاستضافة</small></span><span class="radio-dot"></span></label>
+        </div>
+        <button id="downloadButton" class="primary-button download-button" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5"/><path d="M5 16v4h14v-4"/></svg><span data-i18n="downloadButton">ابدأ التحميل</span></button>
+        <div id="jobProgress" class="job-progress hidden"><div class="progress-top"><span id="progressMessage" data-i18n="preparing">جاري تجهيز طلبك…</span><strong id="progressPercent">0%</strong></div><div class="progress-track"><span id="progressBar"></span></div><p id="progressHint" data-i18n="progressHint">سيتم حذف النسخة المؤقتة تلقائيًا بعد انتهاء العملية.</p><a id="directDownloadLink" class="primary-button download-result hidden" href="#" target="_blank" rel="noopener" data-i18n="directDownload">تنزيل الملف على الجهاز ↗</a></div>
+      </section>
+
+      <section class="feature-strip">
+        <div class="feature-item"><span class="feature-icon">✧</span><div><b data-i18n="featureQuality">اختيارات واضحة</b><small data-i18n="featureQualitySub">الجودات المتاحة وحجمها</small></div></div>
+        <div class="feature-item"><span class="feature-icon">⌁</span><div><b data-i18n="featurePrivacy">خصوصيتك أولًا</b><small data-i18n="featurePrivacySub">ملفات مؤقتة فقط</small></div></div>
+        <div class="feature-item"><span class="feature-icon">◈</span><div><b data-i18n="featureEasy">واجهة بسيطة</b><small data-i18n="featureEasySub">مصممة للموبايل</small></div></div>
+      </section>
+
+      <section id="historyPage" class="panel page-panel hidden"><div class="page-title"><div><span class="eyebrow" data-i18n="personalSpace">YOUR SPACE</span><h2 data-i18n="historyTitle">سجل التحميلات</h2></div><button id="refreshHistory" class="small-outline" data-i18n="refresh">تحديث</button></div><div id="historyList" class="history-list"></div><p class="footnote" data-i18n="historyNote">السجل داخل الذاكرة الحالية وقد يُمسح عند إعادة تشغيل الاستضافة.</p></section>
+
+      <section id="settingsPage" class="panel page-panel hidden"><div class="page-title"><div><span class="eyebrow" data-i18n="preferences">PREFERENCES</span><h2 data-i18n="settingsTitle">الإعدادات</h2></div></div><div class="setting-row"><div><b data-i18n="languageSetting">لغة الواجهة</b><small data-i18n="languageSub">اختر اللغة المناسبة ليك</small></div><div class="segmented"><button id="langAr" class="active">العربية</button><button id="langEn">English</button></div></div><div class="setting-row"><div><b data-i18n="contentRule">الاستخدام المسؤول</b><small data-i18n="contentRuleSub">نزّل فقط الفيديوهات التي تملكها أو لديك إذن بتنزيلها.</small></div><span class="setting-check">✓</span></div><div class="setting-row"><div><b data-i18n="tempFiles">الملفات المؤقتة</b><small data-i18n="tempFilesSub">يتم تنظيف الملفات بعد التسليم أو انتهاء الرابط.</small></div><span class="setting-check">✓</span></div></section>
+
+      <section id="adminPage" class="panel page-panel hidden"><div class="page-title"><div><span class="eyebrow">ADMIN CONSOLE</span><h2 data-i18n="adminTitle">لوحة المشرف</h2></div><button id="refreshAdmin" class="small-outline" data-i18n="refresh">تحديث</button></div><div id="adminStats" class="admin-stats"></div><div class="admin-maintenance"><div><b data-i18n="maintenanceTitle">وضع الصيانة</b><small data-i18n="maintenanceSub">أوقف الطلبات الجديدة مؤقتًا.</small></div><button id="maintenanceToggle" class="small-outline">—</button></div><h3 class="admin-subheading" data-i18n="recentJobs">آخر العمليات</h3><div id="adminRecent" class="history-list"></div><p class="footnote" data-i18n="adminNote">الأرقام هنا تخص جلسة التشغيل الحالية فقط.</p></section>
+
+      <section id="browserGate" class="panel browser-gate hidden"><div class="gate-icon"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11Z"/><path d="M12 8v4m0 4h.01"/></svg></div><h2 data-i18n="openInTelegram">افتح التطبيق من تيليجرام</h2><p data-i18n="telegramAuthRequired">لازم تفتح الـ Mini App من زر البوت عشان نتحقق من حسابك بأمان.</p><a id="openBotButton" class="primary-button" href="https://t.me/" target="_blank" rel="noopener"><span data-i18n="openBot">فتح البوت</span><span>↗</span></a></section>
+
+      <div id="loadingOverlay" class="loading-overlay hidden"><div class="loader-mark"><span>X</span></div><div class="loader-line"></div><p data-i18n="loadingText">بنجهز تجربة AHM X…</p></div>
+    </main>
+
+    <nav class="bottom-nav" aria-label="Main navigation">
+      <button class="nav-item active" data-page="home"><span class="nav-icon"><svg viewBox="0 0 24 24"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1Z"/></svg></span><span data-i18n="navHome">الرئيسية</span></button>
+      <button class="nav-item" data-page="historyPage"><span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5m4-1v5l3 2"/></svg></span><span data-i18n="navHistory">السجل</span></button>
+      <button class="nav-item" data-page="settingsPage"><span class="nav-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="m19.4 15 .1.1 1.1.9-1.3 2.3-1.3-.5a8 8 0 0 1-1.5.9l-.2 1.4h-2.6l-.2-1.4a8 8 0 0 1-1.5-.9l-1.3.5-1.3-2.3 1.1-.9a7 7 0 0 1 0-1.8l-1.1-.9 1.3-2.3 1.3.5a8 8 0 0 1 1.5-.9l.2-1.4h2.6l.2 1.4a8 8 0 0 1 1.5.9l1.3-.5 1.3 2.3-1.1.9a7 7 0 0 1 0 1.8Z"/></svg></span><span data-i18n="navSettings">الإعدادات</span></button>
+      <button id="adminNav" class="nav-item hidden" data-page="adminPage"><span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M12 3 4 7v5c0 5 3.4 8 8 9 4.6-1 8-4 8-9V7Z"/><path d="m9 12 2 2 4-4"/></svg></span><span data-i18n="navAdmin">الإدارة</span></button>
+    </nav>
+    <footer class="footer"><span>BUILT FOR CREATORS</span><b>AHM <em>X</em></b></footer>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
