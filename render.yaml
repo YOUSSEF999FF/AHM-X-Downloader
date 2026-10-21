@@ -24,3 +24,5 @@ services:
         value: "1"
       - key: LOG_LEVEL
         value: INFO
+      - key: YTDLP_NODE_PATH
+        value: /usr/local/bin/node

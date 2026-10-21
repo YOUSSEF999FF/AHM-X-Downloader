@@ -11,11 +11,13 @@ import re
 import secrets
 import shutil
 import socket
+import subprocess
 import tempfile
 import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
+from importlib.metadata import PackageNotFoundError, version as package_version
 from typing import Any
 from urllib.parse import parse_qsl, urlparse
 
@@ -125,9 +127,11 @@ def ytdlp_options(*, quiet: bool = True) -> dict[str, Any]:
         "ignoreerrors": False,
         "restrictfilenames": True,
         "cachedir": False,
-        # yt-dlp's current YouTube extractor uses EJS for supported JavaScript challenges.
-        # Dockerfile supplies Node.js 22; this does not bypass login or anti-bot checks.
-        "js_runtimes": {"node": {}},
+        # GitHub projects and the official yt-dlp EJS guide recommend an explicit
+        # supported runtime. Docker supplies Node.js 22+ and requirements install
+        # yt-dlp-ejs. This improves normal JS challenge compatibility; it does not
+        # authenticate the request or bypass YouTube's sign-in / anti-bot decisions.
+        "js_runtimes": {"node": {"path": os.getenv("YTDLP_NODE_PATH", shutil.which("node") or "node")}},
         "logger": None,
     }
 
@@ -724,7 +728,7 @@ async def lifespan(api: FastAPI):
         telegram_app = None
 
 
-api = FastAPI(title="AHM X Downloader V2", version="2.0.1", lifespan=lifespan)
+api = FastAPI(title="AHM X Downloader V2", version="2.0.2", lifespan=lifespan)
 
 
 @api.exception_handler(Exception)
@@ -761,9 +765,40 @@ async def root():
     return FileResponse(index_path)
 
 
+def installed_version(distribution: str) -> str:
+    try:
+        return package_version(distribution)
+    except PackageNotFoundError:
+        return "missing"
+
+
+def node_runtime_status() -> dict[str, str]:
+    node_path = os.getenv("YTDLP_NODE_PATH") or shutil.which("node")
+    if not node_path:
+        return {"node": "missing", "node_path": ""}
+    try:
+        result = subprocess.run([node_path, "--version"], capture_output=True, text=True, timeout=3, check=False)
+        node_version = (result.stdout or result.stderr).strip()[:40] if result.returncode == 0 else "unavailable"
+    except (OSError, subprocess.SubprocessError):
+        node_version = "unavailable"
+    return {"node": node_version, "node_path": node_path}
+
+
 @api.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok", "service": "ahm-x-downloader-v2", "yt_dlp": str(getattr(getattr(yt_dlp, "version", None), "__version__", "unknown"))}
+    runtime = node_runtime_status()
+    ejs_version = installed_version("yt-dlp-ejs")
+    ytdlp_version = str(getattr(getattr(yt_dlp, "version", None), "__version__", "unknown"))
+    # Keep health HTTP 200 so Render can report service availability; runtime fields
+    # make it obvious in the response if YouTube's normal JS prerequisites are absent.
+    return {
+        "status": "ok",
+        "service": "ahm-x-downloader-v2",
+        "version": "2.0.2",
+        "yt_dlp": ytdlp_version,
+        "yt_dlp_ejs": ejs_version,
+        **runtime,
+    }
 
 
 @api.post("/telegram")

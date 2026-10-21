@@ -1,4 +1,4 @@
-# AHM X Downloader V2 — Telegram Bot + Mini App 🔴⚫
+# AHM X Downloader V2.0.2 — Telegram Bot + Mini App 🔴⚫
 
 واجهة عربية/إنجليزية بتصميم أحمر داكن وأسود، مع بوت Telegram وMini App وBackend مبني على FastAPI و`yt-dlp`.
 
@@ -40,8 +40,14 @@
 ## استكشاف أخطاء Mini App وYouTube
 
 - إذا ظهرت صفحة `Internal Server Error` عند فتح التطبيق، افتح `https://YOUR-SERVICE.onrender.com/health` وتأكد أن الحالة `ok`، ثم راجع Render → Logs في نفس وقت الخطأ. النسخة الحالية تسجل الاستثناءات غير المتوقعة مع مسار الطلب، وتعرض تعليمات واضحة إذا كان `web/index.html` غير موجود. تأكد من رفع المجلد `web/` كاملًا إلى GitHub مع `index.html` و`style.css` و`app.js`.
-- إذا رفض YouTube الطلب برسالة `Sign in to confirm you're not a bot`، فهذا رفض من المنصة/عنوان الاستضافة وليس خطأ في واجهة Mini App. النسخة الحالية تعرض رسالة مفهومة بدل نص طويل. تم ضبط Node.js 22 وتفعيل runtime الخاص به لتوافق yt-dlp الحديث، لكن هذا لا يلغي قرار YouTube برفض عنوان الاستضافة. لا تحاول إدخال ملفات تعريف ارتباط شخصية أو أسرار حساب داخل المستودع؛ البوت لا يتجاوز تسجيل الدخول أو حماية المنصة، وقد لا تكون بعض فيديوهات YouTube متاحة من استضافة عامة.
+- إذا رفض YouTube الطلب برسالة `Sign in to confirm you're not a bot`، فهذا رفض من المنصة/عنوان الاستضافة وليس خطأ في واجهة Mini App. النسخة الحالية تعرض رسالة مفهومة بدل نص طويل. تم ضبط Node.js 22+ وتثبيت `yt-dlp-ejs` صراحةً، مع تحديد مسار Node وإظهار إصدارات `yt-dlp` و`yt-dlp-ejs` وNode في `/health`. هذا يطابق إعداد JavaScript الذي توصي به مراجع yt-dlp ومشاريع GitHub مشابهة، لكنه لا يلغي قرار YouTube برفض عنوان الاستضافة. لا تحاول إدخال ملفات تعريف ارتباط شخصية أو أسرار حساب داخل المستودع؛ البوت لا يتجاوز تسجيل الدخول أو حماية المنصة، وقد لا تكون بعض فيديوهات YouTube متاحة من استضافة عامة.
 - تغيّر حد الاعتماد الأدنى إلى yt-dlp 2026.08.19. بعد رفع التعديلات، نفّذ **Manual Deploy → Clear build cache & deploy** في Render للتأكد من بناء الاعتماديات من جديد.
+
+## تحديث التوافق مع YouTube (V2.0.2)
+
+تم تطبيق نمط التوافق الذي توصي به وثائق `yt-dlp` وبعض مشاريع GitHub المشابهة: تثبيت `yt-dlp-ejs` كاعتماد صريح، تشغيل Node.js 22+ عبر مسار محدد، وإظهار نسخ المكونات في `/health`. لا يضيف هذا التحديث ملفات جلسات أو Cookies شخصية ولا يتجاوز تسجيل الدخول أو رفض المنصة. إذا استمرت رسالة `Sign in to confirm you're not a bot` بعد التأكد من أن `yt_dlp_ejs` ليس `missing` وأن Node يظهر إصدارًا مثل `v22.x`، فالمشكلة صادرة من قرار YouTube تجاه طلبات الاستضافة، وليست خطأ في واجهة Mini App؛ البوت سيعرض رسالة مفهومة بدل نص تقني طويل.
+
+مراجع المقارنة: [yt-dlp EJS setup](https://github.com/yt-dlp/yt-dlp/wiki/ejs)، [yt-dlp-telegram](https://github.com/ssebastianoo/yt-dlp-telegram)، [VideoDownloaderBot](https://github.com/Avazbek22/VideoDownloaderBot).
 
 ## إعدادات البيئة
 
@@ -56,6 +62,7 @@
 | `MAX_VIDEO_HEIGHT` | `1080` | أعلى ارتفاع يعرضه اختيار الجودة |
 | `MAX_ACTIVE_DOWNLOADS` | `1` | أقصى عدد عمليات تنزيل متزامنة على الخدمة |
 | `LOG_LEVEL` | `INFO` | مستوى التسجيل في Logs |
+| `YTDLP_NODE_PATH` | `/usr/local/bin/node` في Render | مسار Node.js المستخدم لحل تحديات JavaScript العادية |
 
 ## تشغيل محلي عبر Docker
 
